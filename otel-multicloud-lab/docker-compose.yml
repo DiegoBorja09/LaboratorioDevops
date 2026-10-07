@@ -1,0 +1,87 @@
+name: otel-multicloud-lab
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orders_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orders_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - lab
+
+  service-b:
+    build:
+      context: ./services/service-b
+    environment:
+      SERVICE_NAME: service-b
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orders_db
+      LOG_LEVEL: INFO
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - lab
+
+  service-a:
+    build:
+      context: ./services/service-a
+    environment:
+      SERVICE_NAME: service-a
+      SERVICE_B_URL: http://service-b:8080
+      SERVICE_B_TIMEOUT_SECONDS: "5"
+      LOG_LEVEL: INFO
+    ports:
+      - "8081:8080"
+    depends_on:
+      service-b:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - lab
+
+volumes:
+  postgres_data:
+    name: otel-multicloud-lab-postgres
+
+networks:
+  lab:
+    name: otel-multicloud-lab
