@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +13,8 @@ router = APIRouter()
 @router.get("/health")
 async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
     try:
-        await session.execute(text("SELECT 1"))
+        with suppress_instrumentation():
+            await session.execute(text("SELECT 1"))
     except SQLAlchemyError as exc:
         raise DatabaseUnavailableError() from exc
     return {

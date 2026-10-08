@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
 import httpx
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from app.core.config import Settings
 from app.core.errors import AppError, ServiceTimeoutError, ServiceUnavailableError
@@ -14,19 +16,30 @@ _CENT = Decimal("0.01")
 
 
 def validate_order(order: OrderCreate) -> OrderCreate:
-    if not order.customer_id:
-        raise AppError("VALIDATION_ERROR", "customer_id es obligatorio", 422)
-    normalized_amount = order.amount.quantize(_CENT, rounding=ROUND_HALF_UP)
-    if normalized_amount <= 0:
-        raise AppError("VALIDATION_ERROR", "amount debe ser mayor que cero", 422)
-    currency = order.currency.upper()
-    if len(currency) != 3:
-        raise AppError(
-            "VALIDATION_ERROR",
-            "currency debe tener exactamente tres caracteres",
-            422,
-        )
-    return order.model_copy(update={"amount": normalized_amount, "currency": currency})
+    tracer = trace.get_tracer("service-a")
+    with tracer.start_as_current_span("validate_order") as span:
+        try:
+            if not order.customer_id:
+                raise AppError("VALIDATION_ERROR", "customer_id es obligatorio", 422)
+            normalized_amount = order.amount.quantize(_CENT, rounding=ROUND_HALF_UP)
+            if normalized_amount <= 0:
+                raise AppError("VALIDATION_ERROR", "amount debe ser mayor que cero", 422)
+            currency = order.currency.upper()
+            if len(currency) != 3:
+                raise AppError(
+                    "VALIDATION_ERROR",
+                    "currency debe tener exactamente tres caracteres",
+                    422,
+                )
+            validated = order.model_copy(update={"amount": normalized_amount, "currency": currency})
+        except AppError as exc:
+            span.set_attribute("order.validation.result", "error")
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR))
+            raise
+        span.set_attribute("order.currency", validated.currency)
+        span.set_attribute("order.validation.result", "success")
+        return validated
 
 
 @dataclass(frozen=True, slots=True)

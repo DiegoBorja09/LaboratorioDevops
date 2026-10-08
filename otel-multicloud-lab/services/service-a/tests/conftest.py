@@ -1,3 +1,7 @@
+import os
+
+os.environ["OTEL_SDK_DISABLED"] = "true"
+
 from collections.abc import AsyncIterator, Callable
 
 import httpx
