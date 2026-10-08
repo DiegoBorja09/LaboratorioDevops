@@ -1,3 +1,7 @@
+import os
+
+os.environ["OTEL_SDK_DISABLED"] = "true"
+
 import inspect
 from collections.abc import AsyncIterator
 from pathlib import Path

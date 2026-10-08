@@ -1,6 +1,6 @@
 # otel-multicloud-lab
 
-Laboratorio académico de observabilidad. Esta primera fase entrega dos microservicios funcionales y una base PostgreSQL. OpenTelemetry no está instalado: la aplicación sirve como línea base para instrumentarla después y comparar el rendimiento con y sin observabilidad.
+Laboratorio académico de observabilidad. La aplicación base sigue igual: service-a, service-b y PostgreSQL. service-a y service-b exportan trazas distribuidas por OTLP hacia un OpenTelemetry Collector y Jaeger. Las métricas y la exportación de logs por OTLP todavía no están implementadas.
 
 ## 1. Requisitos
 
@@ -8,7 +8,7 @@ Laboratorio académico de observabilidad. Esta primera fase entrega dos microser
 - Python 3.12, solo si vas a ejecutar las pruebas fuera de Docker
 - curl
 
-No hace falta clonar otros repositorios ni configurar un recopilador. Las carpetas `collector/`, `monitoring/`, `infrastructure/`, `load-tests/`, `evidence/` y `docs/` quedan reservadas para fases posteriores.
+El Collector local vive en `collector/`. Las carpetas `monitoring/`, `infrastructure/`, `load-tests/`, `evidence/` y `docs/` quedan reservadas para fases posteriores.
 
 ## 2. Arquitectura y flujo de la solicitud
 
@@ -21,7 +21,7 @@ Cliente → service-a → HTTP → service-b → PostgreSQL
 3. service-b ejecuta `process_order`, guarda la fila en la tabla `orders` y responde `201`.
 4. service-a devuelve al cliente el resultado de service-b.
 
-El header `X-Request-ID` viaja en la petición y en la respuesta. Si el cliente no lo envía, service-a genera un UUID. Los logs de ambos servicios son JSON e incluyen `request_id`, método, ruta, código de estado y duración cuando esos datos existen. Todavía no hay `trace_id` ni `span_id`.
+El header `X-Request-ID` viaja en la petición y en la respuesta. Si el cliente no lo envía, service-a genera un UUID. Los logs de ambos servicios siguen siendo JSON e incluyen `request_id`, método, ruta, código de estado y duración cuando esos datos existen. Los logs todavía no llevan `trace_id` ni `span_id`: la correlación de la traza está en Jaeger.
 
 Los errores HTTP usan esta forma y no incluyen stack traces, credenciales ni la cadena de conexión:
 
@@ -53,6 +53,11 @@ Copy-Item .env.example .env
 | `SERVICE_NAME` | Nombre que aparece en los logs | `service-a` o `service-b` |
 | `LOG_LEVEL` | Nivel del logger | `INFO` |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Inicialización de PostgreSQL | `postgres` / `postgres` / `orders_db` |
+| `OTEL_SERVICE_NAME` | Nombre del servicio en las trazas | `service-a` o `service-b` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector OTLP gRPC | `http://otel-collector:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocolo del exportador | `grpc` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Atributos del recurso | service-a: `service.version=1.0.0,deployment.environment=local`. service-b añade `service.namespace=otel-multicloud-lab` |
+| `OTEL_SDK_DISABLED` | Desactiva el SDK en las pruebas | `true` solo en Pytest |
 
 Esas credenciales son solo del laboratorio local. No las reutilices en otro entorno. Compose ya las define, así que `docker compose up --build` no depende de un archivo `.env`.
 
@@ -71,6 +76,10 @@ Puertos locales:
 | service-a | http://localhost:8081 |
 | service-b | http://localhost:8082 |
 | PostgreSQL | `localhost:5433` |
+| Jaeger | http://localhost:16686 |
+| OTel Collector gRPC | `localhost:4317` |
+| OTel Collector HTTP | `localhost:4318` |
+| Salud del Collector | http://localhost:13133 |
 
 service-b espera a que PostgreSQL esté saludable, aplica las migraciones y después arranca Uvicorn. service-a espera a que service-b esté saludable.
 
@@ -173,7 +182,49 @@ Logs JSON de una petición:
 docker compose logs --tail 50 service-a service-b
 ```
 
-## 8. Detener los contenedores
+## 8. Trazas distribuidas
+
+service-a y service-b exportan trazas por OTLP gRPC al mismo Collector. HTTPX inyecta el header W3C `traceparent` en la llamada hacia service-b, y FastAPI lo extrae al recibir la petición. service-b no crea un `trace_id` nuevo: el span servidor continúa la traza que llegó desde service-a. `X-Request-ID` se sigue enviando junto con `traceparent`.
+
+El `trace_id` identifica toda la operación, desde el `POST` del cliente hasta PostgreSQL. El `span_id` identifica cada tramo dentro de esa operación. Los spans de una misma orden comparten el `trace_id` y tienen `span_id` distintos. El span servidor de service-b es hijo del span cliente HTTPX de service-a.
+
+SQLAlchemy asíncrono se instrumenta sobre el `sync_engine` del engine que ya usa service-b. Eso produce spans de `INSERT` y `SELECT`. No se instrumenta asyncpg aparte, para no duplicar la misma consulta. Las migraciones de Alembic corren en otro proceso, antes de arrancar la API, y no pasan por esta instrumentación. `GET /health` no genera trazas.
+
+```mermaid
+flowchart LR
+    cliente[Cliente] --> serviceA[service-a]
+    serviceA -->|HTTP y traceparent| serviceB[service-b]
+    serviceB --> postgres[PostgreSQL]
+    serviceA -->|OTLP gRPC| collector[OTel Collector]
+    serviceB -->|OTLP gRPC| collector
+    collector -->|OTLP gRPC| jaeger[Jaeger]
+```
+
+Jerarquía esperada de `POST /api/v1/orders`:
+
+1. `POST /api/v1/orders`, service-a, servidor.
+2. `validate_order`, service-a.
+3. Llamada HTTPX a service-b, service-a, cliente.
+4. `POST /api/v1/orders/process`, service-b, servidor.
+5. `process_order`, service-b.
+6. `INSERT` de SQLAlchemy hacia PostgreSQL, service-b.
+
+SQLAlchemy puede añadir spans de conexión, transacción o commit. No debe haber dos spans idénticos para la misma consulta. Los spans no incluyen `customer_id`, el monto, el cuerpo de la petición ni la contraseña de la base.
+
+Si el Collector no está disponible, los dos servicios arrancan y procesan órdenes igual. Las métricas y la exportación de logs por OTLP todavía no están implementadas.
+
+Para ver una traza:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+docker compose logs service-b --tail=100
+docker compose logs otel-collector --tail=100
+```
+
+Crea una orden con el `POST` de la sección anterior y abre http://localhost:16686. En Jaeger elige el servicio `service-a`, pulsa Find Traces y abre la traza del `POST /api/v1/orders`. En el detalle deben aparecer service-a y service-b, los spans HTTP, `process_order` y el span de PostgreSQL. Una captura de referencia está en `evidence/traces/02-distributed-trace-service-a-service-b-db.png`.
+
+## 9. Detener los contenedores
 
 ```powershell
 docker compose stop
@@ -185,7 +236,7 @@ Los contenedores, el volumen y la red se conservan. Para volver a arrancar sin r
 docker compose start
 ```
 
-## 9. Limpiar solo los recursos de este proyecto
+## 10. Limpiar solo los recursos de este proyecto
 
 Este comando elimina los contenedores, la red `otel-multicloud-lab`, el volumen `otel-multicloud-lab-postgres` y las imágenes construidas por los Dockerfiles de este Compose. No borra contenedores, volúmenes ni redes de otros proyectos.
 

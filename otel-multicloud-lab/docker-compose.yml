@@ -28,11 +28,17 @@ services:
       SERVICE_NAME: service-b
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orders_db
       LOG_LEVEL: INFO
+      OTEL_SERVICE_NAME: service-b
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
     ports:
       - "8082:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -49,6 +55,32 @@ services:
     networks:
       - lab
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+    networks:
+      - lab
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./collector/otel-collector.local.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - lab
+
   service-a:
     build:
       context: ./services/service-a
@@ -57,11 +89,17 @@ services:
       SERVICE_B_URL: http://service-b:8080
       SERVICE_B_TIMEOUT_SECONDS: "5"
       LOG_LEVEL: INFO
+      OTEL_SERVICE_NAME: service-a
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local
     ports:
       - "8081:8080"
     depends_on:
       service-b:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         [
