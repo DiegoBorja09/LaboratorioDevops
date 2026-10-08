@@ -32,6 +32,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
     ports:
       - "8082:8080"
     depends_on:
@@ -81,6 +82,19 @@ services:
     networks:
       - lab
 
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - lab
+
   service-a:
     build:
       context: ./services/service-a
@@ -92,7 +106,8 @@ services:
       OTEL_SERVICE_NAME: service-a
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
     ports:
       - "8081:8080"
     depends_on:

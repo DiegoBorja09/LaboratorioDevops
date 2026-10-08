@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, Request
 from starlette.responses import Response
 
 from app.api.deps import get_order_service, get_request_id
+from app.core.errors import AppError
+from app.core.metrics import track_order_request
 from app.schemas.error import ErrorResponse
 from app.schemas.order import parse_order
 from app.services.order_service import OrderService
@@ -24,10 +26,16 @@ async def create_order(
     request_id: str = Depends(get_request_id),
     order_service: OrderService = Depends(get_order_service),
 ) -> Response:
-    order = parse_order(await request.body())
-    result = await order_service.submit(order, request_id)
-    return Response(
-        content=result.body,
-        status_code=result.status_code,
-        media_type="application/json",
-    )
+    with track_order_request() as status:
+        try:
+            order = parse_order(await request.body())
+            result = await order_service.submit(order, request_id)
+        except AppError as exc:
+            status["code"] = exc.status_code
+            raise
+        status["code"] = result.status_code
+        return Response(
+            content=result.body,
+            status_code=result.status_code,
+            media_type="application/json",
+        )
