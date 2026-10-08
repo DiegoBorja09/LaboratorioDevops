@@ -4,11 +4,13 @@ from uuid import UUID
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.metrics.export import MetricExportResult
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
 from opentelemetry.trace import StatusCode
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import Settings
+from app.core.metrics import track_processing
 from app.main import create_app
 from app.repositories.order_repository import OrderRepository
 from app.schemas.order import OrderCreate
@@ -269,14 +271,36 @@ def test_setup_telemetry_configures_one_provider(monkeypatch: pytest.MonkeyPatch
             del timeout_millis
             return True
 
+    class _MetricExporter:
+        _preferred_temporality: dict[object, object] = {}
+        _preferred_aggregation: dict[object, object] = {}
+
+        def export(self, metrics_data: object, **kwargs: object) -> MetricExportResult:
+            del metrics_data, kwargs
+            return MetricExportResult.SUCCESS
+
+        def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+            del timeout_millis, kwargs
+
+        def force_flush(self, timeout_millis: float = 30000) -> bool:
+            del timeout_millis
+            return True
+
     monkeypatch.setattr(telemetry.trace, "set_tracer_provider", spy)
     monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_kwargs: _Exporter())
+    monkeypatch.setattr(telemetry, "OTLPMetricExporter", lambda **_kwargs: _MetricExporter())
 
     setup_from = telemetry.setup_telemetry
-    setup_from()
-    first = trace.get_tracer_provider()
-    setup_from()
-    second = trace.get_tracer_provider()
+    try:
+        setup_from()
+        first = trace.get_tracer_provider()
+        setup_from()
+        second = trace.get_tracer_provider()
+    finally:
+        meter_provider = telemetry.metrics.get_meter_provider()
+        shutdown = getattr(meter_provider, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     assert len(calls) == 1
     assert first is second
@@ -332,3 +356,41 @@ async def test_database_error_keeps_existing_http_response(client, monkeypatch: 
     assert "customer-001" not in response.text
     assert "postgres://" not in lowered
     assert "150000.50" not in response.text
+
+
+def test_processing_metrics_record_database_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, list[tuple[object, dict[str, object]]]] = {
+        "processed": [],
+        "errors": [],
+        "duration": [],
+    }
+
+    class _Counter:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def add(self, amount: int, attributes: dict[str, object] | None = None) -> None:
+            recorded[self._name].append((amount, dict(attributes or {})))
+
+    class _Histogram:
+        def record(self, amount: float, attributes: dict[str, object] | None = None) -> None:
+            recorded["duration"].append((amount, dict(attributes or {})))
+
+    monkeypatch.setattr(
+        "app.core.metrics._instruments",
+        lambda: (_Counter("processed"), _Counter("errors"), _Histogram()),
+    )
+
+    with pytest.raises(RuntimeError):
+        with track_processing() as status:
+            del status
+            raise RuntimeError("db")
+
+    assert recorded["processed"] == []
+    assert recorded["errors"][0][1]["result"] == "error"
+    assert recorded["errors"][0][1]["http.route"] == "/api/v1/orders/process"
+    assert recorded["errors"][0][1]["http.response.status_code"] == 500
+    assert recorded["duration"]
+    rendered = str(recorded)
+    assert "customer-001" not in rendered
+    assert "trace_id" not in rendered

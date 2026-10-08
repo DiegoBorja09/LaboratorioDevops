@@ -1,6 +1,6 @@
 # otel-multicloud-lab
 
-Laboratorio académico de observabilidad. La aplicación base sigue igual: service-a, service-b y PostgreSQL. service-a y service-b exportan trazas distribuidas por OTLP hacia un OpenTelemetry Collector y Jaeger. Las métricas y la exportación de logs por OTLP todavía no están implementadas.
+Laboratorio académico de observabilidad. La aplicación base sigue igual: service-a, service-b y PostgreSQL. Ambos servicios exportan trazas y métricas por OTLP hacia un OpenTelemetry Collector. Jaeger recibe las trazas y Prometheus consulta las métricas. La exportación de logs por OTLP y Grafana todavía no están implementadas.
 
 ## 1. Requisitos
 
@@ -56,7 +56,8 @@ Copy-Item .env.example .env
 | `OTEL_SERVICE_NAME` | Nombre del servicio en las trazas | `service-a` o `service-b` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector OTLP gRPC | `http://otel-collector:4317` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocolo del exportador | `grpc` |
-| `OTEL_RESOURCE_ATTRIBUTES` | Atributos del recurso | service-a: `service.version=1.0.0,deployment.environment=local`. service-b añade `service.namespace=otel-multicloud-lab` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Atributos del recurso, compartidos por trazas y métricas | `service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Intervalo de exportación de métricas, en milisegundos | `5000` |
 | `OTEL_SDK_DISABLED` | Desactiva el SDK en las pruebas | `true` solo en Pytest |
 
 Esas credenciales son solo del laboratorio local. No las reutilices en otro entorno. Compose ya las define, así que `docker compose up --build` no depende de un archivo `.env`.
@@ -77,6 +78,7 @@ Puertos locales:
 | service-b | http://localhost:8082 |
 | PostgreSQL | `localhost:5433` |
 | Jaeger | http://localhost:16686 |
+| Prometheus | http://localhost:9090 |
 | OTel Collector gRPC | `localhost:4317` |
 | OTel Collector HTTP | `localhost:4318` |
 | Salud del Collector | http://localhost:13133 |
@@ -198,6 +200,7 @@ flowchart LR
     serviceA -->|OTLP gRPC| collector[OTel Collector]
     serviceB -->|OTLP gRPC| collector
     collector -->|OTLP gRPC| jaeger[Jaeger]
+    collector -->|Prometheus 8889| prometheus[Prometheus]
 ```
 
 Jerarquía esperada de `POST /api/v1/orders`:
@@ -211,7 +214,7 @@ Jerarquía esperada de `POST /api/v1/orders`:
 
 SQLAlchemy puede añadir spans de conexión, transacción o commit. No debe haber dos spans idénticos para la misma consulta. Los spans no incluyen `customer_id`, el monto, el cuerpo de la petición ni la contraseña de la base.
 
-Si el Collector no está disponible, los dos servicios arrancan y procesan órdenes igual. Las métricas y la exportación de logs por OTLP todavía no están implementadas.
+Si el Collector no está disponible, los dos servicios arrancan y procesan órdenes igual. La exportación de logs por OTLP y Grafana todavía no están implementadas.
 
 Para ver una traza:
 
@@ -224,7 +227,53 @@ docker compose logs otel-collector --tail=100
 
 Crea una orden con el `POST` de la sección anterior y abre http://localhost:16686. En Jaeger elige el servicio `service-a`, pulsa Find Traces y abre la traza del `POST /api/v1/orders`. En el detalle deben aparecer service-a y service-b, los spans HTTP, `process_order` y el span de PostgreSQL. Una captura de referencia está en `evidence/traces/02-distributed-trace-service-a-service-b-db.png`.
 
-## 9. Detener los contenedores
+## 9. Métricas
+
+service-a y service-b exportan métricas por el mismo OTLP gRPC que las trazas. El Collector las publica en `otel-collector:8889` y Prometheus las consulta cada 5 segundos. Las métricas internas del Collector salen por el puerto 8888. Jaeger no recibe métricas.
+
+```powershell
+docker compose up -d --build
+```
+
+Prometheus queda en http://localhost:9090. Para generar tráfico:
+
+```powershell
+1..10 | ForEach-Object {
+  @'
+{"customer_id":"customer-001","amount":150000.50,"currency":"cop"}
+'@ | curl.exe -sS -o NUL -w "%{http_code}`n" -X POST http://localhost:8081/api/v1/orders `
+    -H "Content-Type: application/json" `
+    --data-binary "@-"
+}
+@'
+{"customer_id":"customer-001","amount":150000.50,"currency":"x"}
+'@ | curl.exe -sS -o NUL -w "%{http_code}`n" -X POST http://localhost:8081/api/v1/orders `
+  -H "Content-Type: application/json" `
+  --data-binary "@-"
+```
+
+Espera unos segundos, porque el SDK exporta cada 5 segundos y Prometheus tarda otro scrape. En http://localhost:9090/graph ejecuta, por ejemplo:
+
+```promql
+app_orders_requests_total{service_name="service-a"}
+app_orders_errors_total{service_name="service-a"}
+app_orders_duration_seconds_bucket{service_name="service-a"}
+app_orders_in_flight{service_name="service-a"}
+app_orders_processed_total{service_name="service-b"}
+app_orders_processing_errors_total{service_name="service-b"}
+app_orders_processing_duration_seconds_bucket{service_name="service-b"}
+up
+```
+
+Esos son los nombres que publica el exporter de esta versión: los puntos pasan a guiones bajos, la unidad `s` se vuelve `_seconds` y los contadores ganan el sufijo `_total`. `trace_id` no aparece como etiqueta. Para listar todos los nombres:
+
+```powershell
+curl.exe -sS "http://localhost:9090/api/v1/label/__name__/values"
+```
+
+`service_name="service-a"` y `service_name="service-b"` confirman que ambos servicios exportan. `up{job="otel-collector"}` y `up{job="otel-collector-internal"}` confirman que Prometheus llega al Collector.
+
+## 10. Detener los contenedores
 
 ```powershell
 docker compose stop
@@ -236,7 +285,7 @@ Los contenedores, el volumen y la red se conservan. Para volver a arrancar sin r
 docker compose start
 ```
 
-## 10. Limpiar solo los recursos de este proyecto
+## 11. Limpiar solo los recursos de este proyecto
 
 Este comando elimina los contenedores, la red `otel-multicloud-lab`, el volumen `otel-multicloud-lab-postgres` y las imágenes construidas por los Dockerfiles de este Compose. No borra contenedores, volúmenes ni redes de otros proyectos.
 
