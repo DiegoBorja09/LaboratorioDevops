@@ -31,7 +31,8 @@ jobs:
         working-directory: otel-multicloud-lab/services/service-a
         env:
           OTEL_SDK_DISABLED: "true"
-        run: pytest
+          PYTHONPATH: ${{ github.workspace }}/otel-multicloud-lab/services/service-a
+        run: python -m pytest
 
       - name: Instalar dependencias de service-b
         working-directory: otel-multicloud-lab/services/service-b
@@ -41,7 +42,8 @@ jobs:
         working-directory: otel-multicloud-lab/services/service-b
         env:
           OTEL_SDK_DISABLED: "true"
-        run: pytest
+          PYTHONPATH: ${{ github.workspace }}/otel-multicloud-lab/services/service-b
+        run: python -m pytest
 
       - name: Construir las imágenes Docker
         run: |
