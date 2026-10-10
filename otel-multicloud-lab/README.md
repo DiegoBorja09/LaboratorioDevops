@@ -489,7 +489,7 @@ Limitaciones: una sola corrida local, sin aislar CPU, con el calentamiento fuera
 
 ## 14. Integración continua
 
-El workflow `.github/workflows/ci.yml` se ejecuta en cada `push` y en cada `pull_request`. Comprueba que los dos servicios pasan sus pruebas, que sus imágenes Docker se construyen y que Terraform tiene formato y sintaxis válidos. No inicia sesión en AWS ni en GCP, no ejecuta `plan`, `apply` ni `destroy`, no publica imágenes y no crea recursos.
+El workflow está en la raíz del repositorio Git, en `.github/workflows/ci.yml`, porque el laboratorio vive en la carpeta `otel-multicloud-lab` y GitHub Actions no ejecuta workflows anidados. Se dispara en cada `push`, en cada `pull_request` y también se puede lanzar a mano. Comprueba que los dos servicios pasan sus pruebas, que sus imágenes Docker se construyen y que Terraform tiene formato y sintaxis válidos. No inicia sesión en AWS ni en GCP, no ejecuta `plan`, `apply` ni `destroy`, no publica imágenes y no crea recursos.
 
 En orden hace esto:
 

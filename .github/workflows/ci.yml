@@ -11,6 +11,9 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: otel-multicloud-lab
     steps:
       - name: Obtener el código
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -21,21 +24,21 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias de service-a
-        working-directory: services/service-a
+        working-directory: otel-multicloud-lab/services/service-a
         run: pip install -r requirements-dev.txt
 
       - name: Ejecutar pruebas de service-a
-        working-directory: services/service-a
+        working-directory: otel-multicloud-lab/services/service-a
         env:
           OTEL_SDK_DISABLED: "true"
         run: pytest
 
       - name: Instalar dependencias de service-b
-        working-directory: services/service-b
+        working-directory: otel-multicloud-lab/services/service-b
         run: pip install -r requirements-dev.txt
 
       - name: Ejecutar pruebas de service-b
-        working-directory: services/service-b
+        working-directory: otel-multicloud-lab/services/service-b
         env:
           OTEL_SDK_DISABLED: "true"
         run: pytest
@@ -55,13 +58,13 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: Validar infrastructure/aws
-        working-directory: infrastructure/aws
+        working-directory: otel-multicloud-lab/infrastructure/aws
         run: |
           terraform init -backend=false -input=false
           terraform validate
 
       - name: Validar infrastructure/gcp
-        working-directory: infrastructure/gcp
+        working-directory: otel-multicloud-lab/infrastructure/gcp
         run: |
           terraform init -backend=false -input=false
           terraform validate
