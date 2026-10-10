@@ -42,6 +42,29 @@ def dumps_log(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def log_event(
+    logger: logging.Logger,
+    level: int,
+    message: str,
+    event_name: str,
+    *,
+    result: str | None = None,
+    error_type: str | None = None,
+    route: str | None = None,
+    method: str | None = None,
+) -> None:
+    extra: dict[str, Any] = {"event.name": event_name}
+    if route is not None:
+        extra["http.route"] = route
+    if method is not None:
+        extra["http.request.method"] = method
+    if result is not None:
+        extra["result"] = result
+    if error_type is not None:
+        extra["error.type"] = error_type
+    logger.log(level, message, extra=extra)
+
+
 def configure_logging(service_name: str, level: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter(service_name))
@@ -59,6 +82,9 @@ def configure_logging(service_name: str, level: str) -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    from app.core.telemetry import attach_log_handler
+
+    attach_log_handler()
 
 
 def build_uvicorn_log_config(service_name: str, level: str) -> dict[str, Any]:

@@ -1,0 +1,14 @@
+metrica,baseline,otel,overhead_porcentaje,nota
+Latencia promedio (ms),256.72,321.60,25.27,Un valor positivo indica más latencia con OpenTelemetry
+Latencia p95 (ms),448.27,619.27,38.15,Un valor positivo indica más latencia con OpenTelemetry
+Latencia p99 (ms),538.52,822.78,52.78,Umbral de la prueba: p99 inferior a 500 ms
+Solicitudes por segundo,109.21,95.66,12.41,Aquí el porcentaje es degradación: (baseline - otel) / baseline
+Errores (%),0.00,0.00,no calculable,Umbral de la prueba: menos del 1 %
+CPU promedio (%) service-a,57.21,71.00,24.12,"docker stats, no métricas del SDK"
+CPU máxima (%) service-a,97.52,98.71,1.22,"docker stats, no métricas del SDK"
+Memoria promedio (MiB) service-a,61.77,68.92,11.58,Calculado desde memory_bytes del CSV
+Memoria máxima (MiB) service-a,74.38,81.43,9.48,Calculado desde memory_bytes del CSV
+CPU promedio (%) service-b,91.95,98.27,6.88,"docker stats, no métricas del SDK"
+CPU máxima (%) service-b,123.24,128.04,3.89,"docker stats, no métricas del SDK"
+Memoria promedio (MiB) service-b,98.85,87.00,-11.99,Calculado desde memory_bytes del CSV
+Memoria máxima (MiB) service-b,111.50,98.80,-11.39,Calculado desde memory_bytes del CSV

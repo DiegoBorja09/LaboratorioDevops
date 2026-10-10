@@ -23,5 +23,8 @@ build/
 *.egg-info/
 postgres-data/
 docker-data/
+.terraform/
+*.tfstate
+*.tfstate.*
 *.sqlite3
 *.db
