@@ -33,6 +33,7 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     ports:
       - "8082:8080"
     depends_on:
@@ -78,6 +79,8 @@ services:
     depends_on:
       jaeger:
         condition: service_started
+      loki:
+        condition: service_started
     restart: unless-stopped
     networks:
       - lab
@@ -86,11 +89,50 @@ services:
     image: prom/prometheus:v3.4.2
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
     ports:
       - "9090:9090"
     depends_on:
       otel-collector:
         condition: service_started
+    restart: unless-stopped
+    networks:
+      - lab
+
+  grafana:
+    image: grafana/grafana-oss:12.4.3
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lab
+
+  loki:
+    image: grafana/loki:3.5.12
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
     networks:
       - lab
@@ -108,6 +150,7 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     ports:
       - "8081:8080"
     depends_on:
@@ -131,9 +174,23 @@ services:
     networks:
       - lab
 
+  k6:
+    image: grafana/k6:2.3.0
+    profiles: ["benchmark"]
+    user: "0:0"
+    volumes:
+      - ./load-tests:/scripts:ro
+      - ./load-tests/results:/results
+    environment:
+      BASE_URL: http://service-a:8080
+    networks:
+      - lab
+
 volumes:
   postgres_data:
     name: otel-multicloud-lab-postgres
+  loki_data:
+    name: otel-multicloud-lab-loki
 
 networks:
   lab:

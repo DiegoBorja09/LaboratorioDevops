@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Instalar Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias de service-a
+        working-directory: services/service-a
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas de service-a
+        working-directory: services/service-a
+        env:
+          OTEL_SDK_DISABLED: "true"
+        run: pytest
+
+      - name: Instalar dependencias de service-b
+        working-directory: services/service-b
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas de service-b
+        working-directory: services/service-b
+        env:
+          OTEL_SDK_DISABLED: "true"
+        run: pytest
+
+      - name: Construir las imágenes Docker
+        run: |
+          docker build --tag otel-multicloud-lab-service-a:ci services/service-a
+          docker build --tag otel-multicloud-lab-service-b:ci services/service-b
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+
+      - name: Comprobar el formato de Terraform
+        run: terraform fmt -check -recursive
+
+      - name: Validar infrastructure/aws
+        working-directory: infrastructure/aws
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validar infrastructure/gcp
+        working-directory: infrastructure/gcp
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate

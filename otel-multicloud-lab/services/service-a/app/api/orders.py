@@ -1,14 +1,19 @@
+import logging
+
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import Response
 
 from app.api.deps import get_order_service, get_request_id
 from app.core.errors import AppError
+from app.core.logging import log_event
 from app.core.metrics import track_order_request
 from app.schemas.error import ErrorResponse
 from app.schemas.order import parse_order
 from app.services.order_service import OrderService
 
 router = APIRouter(prefix="/api/v1")
+_ROUTE = "/api/v1/orders"
+_METHOD = "POST"
 
 
 @router.post(
@@ -29,9 +34,44 @@ async def create_order(
     with track_order_request() as status:
         try:
             order = parse_order(await request.body())
+        except AppError as exc:
+            status["code"] = exc.status_code
+            log_event(
+                logging.getLogger("app.orders"),
+                logging.WARNING,
+                "Validación de pedido finalizada",
+                "order.validation.completed",
+                result="error",
+                error_type=exc.code,
+                route=_ROUTE,
+                method=_METHOD,
+            )
+            log_event(
+                logging.getLogger("app.orders"),
+                logging.WARNING,
+                "Solicitud de pedido fallida",
+                "order.request.failed",
+                result="error",
+                error_type=exc.code,
+                route=_ROUTE,
+                method=_METHOD,
+            )
+            raise
+        try:
             result = await order_service.submit(order, request_id)
         except AppError as exc:
             status["code"] = exc.status_code
+            if exc.status_code < 500:
+                log_event(
+                    logging.getLogger("app.orders"),
+                    logging.WARNING,
+                    "Solicitud de pedido fallida",
+                    "order.request.failed",
+                    result="error",
+                    error_type=exc.code,
+                    route=_ROUTE,
+                    method=_METHOD,
+                )
             raise
         status["code"] = result.status_code
         return Response(

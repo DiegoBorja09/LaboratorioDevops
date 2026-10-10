@@ -85,6 +85,21 @@ def _sqlite_settings(tmp_path) -> Settings:
 
 def test_app_starts_when_sdk_is_disabled() -> None:
     assert telemetry.sdk_disabled() is True
+
+
+def test_disabled_sdk_does_not_initialize_providers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    telemetry._configured = False
+    called: list[str] = []
+    monkeypatch.setattr(telemetry, "_setup_traces", lambda _resource: called.append("traces"))
+    monkeypatch.setattr(telemetry, "_setup_metrics", lambda _resource: called.append("metrics"))
+    monkeypatch.setattr(telemetry, "_setup_logs", lambda _resource: called.append("logs"))
+    monkeypatch.setattr(telemetry, "_setup_process_metrics", lambda: called.append("process"))
+
+    telemetry.setup_telemetry()
+
+    assert called == []
+    assert telemetry._configured is False
     application = create_app(
         Settings(
             service_name="service-b",
@@ -286,9 +301,21 @@ def test_setup_telemetry_configures_one_provider(monkeypatch: pytest.MonkeyPatch
             del timeout_millis
             return True
 
+    class _LogExporter:
+        def export(self, batch: object, **kwargs: object) -> None:
+            del batch, kwargs
+
+        def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+            del timeout_millis, kwargs
+
+        def force_flush(self, timeout_millis: float = 30000) -> bool:
+            del timeout_millis
+            return True
+
     monkeypatch.setattr(telemetry.trace, "set_tracer_provider", spy)
     monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_kwargs: _Exporter())
     monkeypatch.setattr(telemetry, "OTLPMetricExporter", lambda **_kwargs: _MetricExporter())
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda **_kwargs: _LogExporter())
 
     setup_from = telemetry.setup_telemetry
     try:
@@ -297,10 +324,7 @@ def test_setup_telemetry_configures_one_provider(monkeypatch: pytest.MonkeyPatch
         setup_from()
         second = trace.get_tracer_provider()
     finally:
-        meter_provider = telemetry.metrics.get_meter_provider()
-        shutdown = getattr(meter_provider, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
+        telemetry.shutdown_telemetry()
 
     assert len(calls) == 1
     assert first is second

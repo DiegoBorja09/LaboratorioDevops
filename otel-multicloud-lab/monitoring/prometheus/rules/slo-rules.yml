@@ -1,0 +1,104 @@
+groups:
+  - name: sre-orders-recording
+    interval: 15s
+    rules:
+      - record: sre:orders:request_rate_5m
+        expr: sum(rate(app_orders_requests_total{service_name="service-a"}[5m]))
+
+      - record: sre:orders:error_ratio_5m
+        expr: >
+          (
+            sum(rate(app_orders_errors_total{service_name="service-a"}[5m]))
+            /
+            clamp_min(sum(rate(app_orders_requests_total{service_name="service-a"}[5m])), 0.000001)
+          )
+          and on() (sum(rate(app_orders_requests_total{service_name="service-a"}[5m])) > 0)
+
+      - record: sre:orders:availability_ratio_5m
+        expr: >
+          (
+            sum(rate(app_orders_requests_total{service_name="service-a",result="success"}[5m]))
+            /
+            clamp_min(sum(rate(app_orders_requests_total{service_name="service-a"}[5m])), 0.000001)
+          )
+          and on() (sum(rate(app_orders_requests_total{service_name="service-a"}[5m])) > 0)
+
+      - record: sre:orders:latency_p95_seconds_5m
+        expr: >
+          histogram_quantile(0.95,
+            sum by (le) (rate(app_orders_duration_seconds_bucket{service_name="service-a"}[5m]))
+          )
+
+      - record: sre:orders:latency_p99_seconds_5m
+        expr: >
+          histogram_quantile(0.99,
+            sum by (le) (rate(app_orders_duration_seconds_bucket{service_name="service-a"}[5m]))
+          )
+
+      - record: sre:orders:latency_under_500ms_ratio_5m
+        expr: >
+          (
+            sum(rate(app_orders_duration_seconds_bucket{service_name="service-a",le="0.5"}[5m]))
+            /
+            clamp_min(sum(rate(app_orders_duration_seconds_count{service_name="service-a"}[5m])), 0.000001)
+          )
+          and on() (sum(rate(app_orders_duration_seconds_count{service_name="service-a"}[5m])) > 0)
+
+  - name: sre-orders-alerts
+    interval: 15s
+    rules:
+      - alert: HighOrderErrorRate
+        expr: sre:orders:error_ratio_5m > 0.05 and sre:orders:request_rate_5m > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: service-a
+          team: observabilidad
+        annotations:
+          summary: La tasa de errores de pedidos supera el 5 %
+          description: Durante al menos un minuto, más del 5 % de las solicitudes de service-a terminaron en error. La tasa actual es {{ $value }}.
+          runbook_url: docs/runbooks/high-error-rate.md
+
+      - alert: AvailabilitySLOBreach
+        expr: sre:orders:availability_ratio_5m < 0.999 and sre:orders:request_rate_5m > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: service-a
+          team: observabilidad
+        annotations:
+          summary: La disponibilidad de pedidos está por debajo del SLO de 99.9 %
+          description: Durante al menos dos minutos, la disponibilidad de service-a quedó bajo 99.9 % mientras había tráfico. El ratio actual es {{ $value }}.
+          runbook_url: docs/runbooks/availability-slo-breach.md
+
+      - alert: HighOrderP99Latency
+        expr: sre:orders:latency_p99_seconds_5m > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          service: service-a
+          team: observabilidad
+        annotations:
+          summary: La latencia p99 de pedidos supera 500 ms
+          description: Durante al menos dos minutos, el percentil 99 de app_orders_duration_seconds superó 0.5 segundos. El valor actual es {{ $value }} segundos.
+          runbook_url: docs/runbooks/high-latency.md
+
+      - alert: OpenTelemetryCollectorExportFailure
+        expr: >
+          (
+            sum(increase(otelcol_receiver_refused_spans[1m]))
+            + sum(increase(otelcol_receiver_refused_log_records[1m]))
+            + sum(increase(otelcol_receiver_refused_metric_points[1m]))
+            + sum(increase(otelcol_receiver_failed_spans[1m]))
+            + sum(increase(otelcol_receiver_failed_log_records[1m]))
+            + sum(increase(otelcol_receiver_failed_metric_points[1m]))
+          ) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: otel-collector
+          team: observabilidad
+        annotations:
+          summary: El Collector rechaza o no procesa datos de observabilidad
+          description: Durante al menos un minuto aumentaron spans, logs o puntos de métrica rechazados o fallidos en el receptor. Este Collector no publica series de envío fallido del exportador. El incremento actual es {{ $value }}.
+          runbook_url: docs/runbooks/collector-export-failure.md

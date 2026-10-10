@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+from app.core.logging import log_event
 from app.core.metrics import track_processing
 from app.models.order import Order
 from app.repositories.order_repository import OrderRepository
@@ -14,6 +15,8 @@ from app.schemas.order import OrderCreate
 logger = logging.getLogger("app.orders")
 _CENT = Decimal("0.01")
 ORDER_STATUS_PROCESSED = "PROCESSED"
+_ROUTE = "/api/v1/orders/process"
+_METHOD = "POST"
 
 
 async def process_order(
@@ -24,6 +27,14 @@ async def process_order(
     tracer = trace.get_tracer("service-b")
     with track_processing() as status:
         with tracer.start_as_current_span("process_order") as span:
+            log_event(
+                logger,
+                logging.INFO,
+                "Procesamiento de pedido iniciado",
+                "order.processing.started",
+                route=_ROUTE,
+                method=_METHOD,
+            )
             try:
                 entity = Order(
                     id=uuid4(),
@@ -39,11 +50,29 @@ async def process_order(
                 span.set_attribute("order.processing.result", "error")
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR))
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "Procesamiento de pedido fallido",
+                    "order.processing.failed",
+                    result="error",
+                    error_type=exc.__class__.__name__,
+                    route=_ROUTE,
+                    method=_METHOD,
+                )
                 raise
             span.set_attribute("order.currency", saved.currency)
             span.set_attribute("order.processing.result", "success")
             span.set_attribute("order.status", saved.status)
-            logger.info("Orden procesada", extra={"request_id": str(request_id)})
+            log_event(
+                logger,
+                logging.INFO,
+                "Procesamiento de pedido completado",
+                "order.processing.completed",
+                result="success",
+                route=_ROUTE,
+                method=_METHOD,
+            )
             status["code"] = 201
             return saved
 

@@ -6,8 +6,11 @@ sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
 greenlet==3.1.1
+# LoggerProvider, LoggingHandler, BatchLogRecordProcessor y OTLPLogExporter
+# forman parte de estas dos versiones. No añadas otro paquete de logs.
 opentelemetry-api==1.45.1
 opentelemetry-sdk==1.45.1
 opentelemetry-exporter-otlp-proto-grpc==1.45.1
 opentelemetry-instrumentation-fastapi==0.66b1
 opentelemetry-instrumentation-sqlalchemy==0.66b1
+opentelemetry-instrumentation-system-metrics==0.66b1
