@@ -8,7 +8,7 @@ Laboratorio académico de observabilidad. La aplicación base sigue igual: servi
 - Python 3.12, solo si vas a ejecutar las pruebas fuera de Docker
 - curl
 
-El Collector local vive en `collector/`. Prometheus, Loki y Grafana viven en `monitoring/`. Las pruebas de carga están en `load-tests/` y la documentación en `docs/`. `infrastructure/aws` e `infrastructure/gcp` no declaran recursos: solo permiten que el pipeline compruebe el formato y la sintaxis. Las capturas van en `evidence/`.
+El Collector local vive en `collector/`. Prometheus, Loki y Grafana viven en `monitoring/`. Las pruebas de carga están en `load-tests/` y la documentación en `docs/`. `infrastructure/aws` despliega service-b, PostgreSQL y el AWS Distro for OpenTelemetry Collector en una sola EC2; el procedimiento está en el apartado 17. `infrastructure/gcp` despliega service-a en Cloud Run con un sidecar del collector de Google; el procedimiento está en el apartado 18. Las capturas van en `evidence/`.
 
 ## 2. Arquitectura y flujo de la solicitud
 
@@ -499,7 +499,7 @@ En orden hace esto:
 4. Ejecuta `terraform fmt -check -recursive`.
 5. Ejecuta `terraform init -backend=false` y `terraform validate` en `infrastructure/aws` y en `infrastructure/gcp`.
 
-Esas raíces de Terraform no contienen recursos ni proveedores. El pipeline usa Terraform 1.16.5 y las acciones fijadas por el commit `actions/checkout` v7.0.1, `actions/setup-python` v7.0.0 y `hashicorp/setup-terraform` v4.0.1.
+`infrastructure/aws` declara el laboratorio de EC2, ECR y el grupo de logs. `infrastructure/gcp` declara Cloud Run, Artifact Registry y el secreto del collector. El pipeline solo comprueba formato y sintaxis: no inicia sesión en AWS ni en GCP, no publica imágenes y no crea recursos. Usa Terraform 1.16.5 y las acciones fijadas por el commit `actions/checkout` v7.0.1, `actions/setup-python` v7.0.0 y `hashicorp/setup-terraform` v4.0.1.
 
 ## 15. Detener los contenedores
 
@@ -525,4 +525,86 @@ La imagen pública `postgres:16-alpine` permanece en la caché local de Docker p
 
 ```powershell
 docker image rm postgres:16-alpine
+```
+
+## 17. AWS: una instancia para service-b
+
+El código está en `infrastructure/aws`. El detalle y los supuestos están en `infrastructure/aws/README.md`.
+
+La cuenta aporta la VPC predeterminada y una subred pública de `us-east-1`. Terraform crea un repositorio ECR privado, un grupo de CloudWatch Logs con retención de 1 día, un rol de instancia y una EC2 `t3.small` con Amazon Linux 2023, disco gp3 cifrado de 8 GB e IPv4 pública automática. En esa instancia conviven PostgreSQL, el AWS Distro for OpenTelemetry Collector y service-b, unidos por la red Docker `otel-lab`. Internet solo puede entrar por TCP 8082. PostgreSQL y OTLP no se publican. El acceso de administración es Systems Manager, sin llave SSH. La contraseña de PostgreSQL la genera `random_password` y no se guarda en archivos versionados. El collector también reenvía trazas, métricas y logs a Grafana Cloud, además de X-Ray y CloudWatch. El token se escribe solo en `terraform.tfvars`, que Git ignora. service-b usa `deployment.environment=aws`.
+
+Hay que desplegar en dos fases. `create_instance = false` crea solo ECR. La imagen tiene que estar publicada antes de pasarlo a `true` y crear la EC2.
+
+1. Crear únicamente ECR para poder publicar la imagen.
+
+```powershell
+Copy-Item infrastructure\aws\terraform.tfvars.example infrastructure\aws\terraform.tfvars
+terraform -chdir=infrastructure/aws init
+terraform -chdir=infrastructure/aws apply
+```
+
+2. Construir y publicar service-b.
+
+```powershell
+$repository = terraform -chdir=infrastructure/aws output -raw ecr_repository_url
+$registry = $repository.Split("/")[0]
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $registry
+docker build --platform linux/amd64 --tag "${repository}:lab" services/service-b
+docker push "${repository}:lab"
+```
+
+3. Revisar el plan completo. Antes, en `infrastructure/aws/terraform.tfvars`, deja `create_instance = true`.
+
+```powershell
+terraform -chdir=infrastructure/aws plan
+```
+
+4. Crear EC2.
+
+```powershell
+terraform -chdir=infrastructure/aws apply
+```
+
+5. Verificar `/health`. El primer arranque tarda varios minutos.
+
+```powershell
+curl.exe (terraform -chdir=infrastructure/aws output -raw service_b_health_url)
+```
+
+6. Ejecutar `terraform destroy` al terminar. El puerto queda público y la instancia sigue teniendo costo.
+
+```powershell
+terraform -chdir=infrastructure/aws destroy
+```
+
+## 18. GCP: service-a en Cloud Run
+
+El código está en `infrastructure/gcp`. El detalle y los supuestos están en `infrastructure/gcp/README.md`.
+
+`create_service = false` habilita las APIs del laboratorio, crea el repositorio privado `otel-multicloud-lab`, la cuenta de servicio y el secreto del collector. `create_service = true` agrega Cloud Run en `us-east1` con service-a en el puerto 8080 y el Google-Built OpenTelemetry Collector como sidecar. Ese collector envía trazas, métricas y logs solo a Grafana Cloud. service-a usa `deployment.environment=gcp`. El token no se versiona. La instancia escala a cero y admite como máximo una copia. El tráfico de la demostración es público.
+
+1. Crear el registro y publicar la imagen, con `create_service = false`.
+
+```powershell
+Copy-Item infrastructure\gcp\terraform.tfvars.example infrastructure\gcp\terraform.tfvars
+terraform -chdir=infrastructure/gcp init
+terraform -chdir=infrastructure/gcp apply
+$image = terraform -chdir=infrastructure/gcp output -raw service_a_image_url
+gcloud auth configure-docker us-east1-docker.pkg.dev
+docker build --platform linux/amd64 --tag $image services/service-a
+docker push $image
+```
+
+2. Revisar el plan completo y crear Cloud Run. Antes, en `terraform.tfvars`, deja `create_service = true` y escribe la URL de service-b en `service_b_url`.
+
+```powershell
+terraform -chdir=infrastructure/gcp plan
+terraform -chdir=infrastructure/gcp apply
+curl.exe "$((terraform -chdir=infrastructure/gcp output -raw service_a_url))/health"
+```
+
+3. Ejecutar `terraform destroy` al terminar. Las APIs quedan habilitadas.
+
+```powershell
+terraform -chdir=infrastructure/gcp destroy
 ```

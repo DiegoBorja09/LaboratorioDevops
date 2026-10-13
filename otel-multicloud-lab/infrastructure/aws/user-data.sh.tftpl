@@ -1,0 +1,133 @@
+#!/bin/bash
+# Plantilla de Terraform. random_password inyecta la contraseña al aplicar.
+# Este archivo versionado no contiene la contraseña.
+set -euo pipefail
+exec > /var/log/otel-lab-user-data.log 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+docker info >/dev/null
+
+mkdir -p /opt/otel-lab
+cat > /opt/otel-lab/collector.yaml <<'EOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+
+exporters:
+  awsxray:
+    region: ${aws_region}
+  awsemf:
+    region: ${aws_region}
+    namespace: otel-multicloud-lab
+    log_group_name: "${log_group_name}"
+    log_stream_name: metrics
+  awscloudwatchlogs:
+    region: ${aws_region}
+    log_group_name: "${log_group_name}"
+    log_stream_name: service-b
+  otlphttp/grafana:
+    endpoint: "${grafana_otlp_endpoint}"
+    headers:
+      Authorization: "${grafana_otlp_auth}"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [awsxray, otlphttp/grafana]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [awsemf, otlphttp/grafana]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [awscloudwatchlogs, otlphttp/grafana]
+EOF
+chmod 644 /opt/otel-lab/collector.yaml
+
+docker network create otel-lab
+
+docker pull "${postgres_image}"
+docker run -d \
+  --name postgres \
+  --network otel-lab \
+  --restart unless-stopped \
+  -e POSTGRES_USER="${postgres_user}" \
+  -e POSTGRES_PASSWORD="${postgres_password}" \
+  -e POSTGRES_DB="${postgres_db}" \
+  "${postgres_image}"
+
+logged_in=0
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if aws ecr get-login-password --region "${aws_region}" | docker login --username AWS --password-stdin "${ecr_registry}"; then
+    logged_in=1
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 5
+done
+if [ "$logged_in" -ne 1 ]; then
+  echo "No fue posible autenticarse en ECR" >&2
+  exit 1
+fi
+
+docker pull "${adot_image}"
+docker pull "${service_b_image}"
+
+ready=0
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if docker exec postgres pg_isready -U "${postgres_user}" -d "${postgres_db}"; then
+    ready=1
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  echo "PostgreSQL no aceptó conexiones" >&2
+  exit 1
+fi
+
+docker run -d \
+  --name otel-collector \
+  --network otel-lab \
+  --restart unless-stopped \
+  -e AWS_REGION="${aws_region}" \
+  -v /opt/otel-lab/collector.yaml:/etc/otel-agent-config.yaml:ro \
+  "${adot_image}" \
+  --config=/etc/otel-agent-config.yaml
+
+docker run -d \
+  --name service-b \
+  --network otel-lab \
+  --restart unless-stopped \
+  -p "${service_b_port}:8080" \
+  -e SERVICE_NAME=service-b \
+  -e DATABASE_URL="postgresql+asyncpg://${postgres_user}:${postgres_password}@postgres:5432/${postgres_db}" \
+  -e LOG_LEVEL=INFO \
+  -e OTEL_SERVICE_NAME=service-b \
+  -e DEPLOYMENT_ENVIRONMENT=aws \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+  -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+  -e OTEL_RESOURCE_ATTRIBUTES="service.name=service-b,service.version=1.0.0,deployment.environment=aws,service.namespace=otel-multicloud-lab" \
+  -e OTEL_METRIC_EXPORT_INTERVAL=5000 \
+  -e OTEL_SDK_DISABLED=false \
+  "${service_b_image}"

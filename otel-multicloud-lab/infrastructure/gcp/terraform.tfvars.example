@@ -1,0 +1,9 @@
+project_id                = "otel-multicloud-lab-75147"
+region                    = "us-east1"
+create_service            = false
+service_a_image_tag       = "lab"
+service_b_url             = ""
+service_b_timeout_seconds = 5
+log_level                 = "INFO"
+grafana_otlp_endpoint     = "https://otlp-gateway.example.invalid/otlp"
+grafana_otlp_auth         = "Basic REPLACE_WITH_BASE64"

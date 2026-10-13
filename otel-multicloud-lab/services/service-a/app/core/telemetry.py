@@ -63,6 +63,11 @@ def _insecure_endpoint(endpoint: str) -> bool:
     return endpoint.startswith("http://") or "://" not in endpoint
 
 
+def _deployment_environment() -> str:
+    value = os.environ.get("DEPLOYMENT_ENVIRONMENT", "local").strip()
+    return value or "local"
+
+
 def _shared_resource() -> Resource:
     global _resource
     if _resource is None:
@@ -70,7 +75,7 @@ def _shared_resource() -> Resource:
             {
                 "service.name": "service-a",
                 "service.version": "1.0.0",
-                "deployment.environment": "local",
+                "deployment.environment": _deployment_environment(),
                 "service.namespace": "otel-multicloud-lab",
             }
         )

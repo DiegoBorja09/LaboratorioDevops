@@ -1,0 +1,52 @@
+# Plantilla de Terraform. grafana_otlp_endpoint y grafana_otlp_auth se sustituyen al aplicar.
+# El archivo versionado no contiene el token. El collector 0.162.0 registra el exporter como otlphttp.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: localhost:4317
+      http:
+        endpoint: localhost:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 65
+    spike_limit_percentage: 20
+  resource:
+    attributes:
+      - key: service.namespace
+        value: otel-multicloud-lab
+        action: insert
+  batch:
+    send_batch_max_size: 200
+    send_batch_size: 200
+    timeout: 5s
+
+exporters:
+  otlphttp/grafana:
+    endpoint: "${grafana_otlp_endpoint}"
+    headers:
+      Authorization: "${grafana_otlp_auth}"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions:
+    - health_check
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/grafana]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/grafana]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/grafana]

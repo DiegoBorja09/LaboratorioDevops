@@ -26,5 +26,15 @@ docker-data/
 .terraform/
 *.tfstate
 *.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+application_default_credentials.json
+*-credentials.json
+*service-account*.json
+*-sa.json
 *.sqlite3
 *.db
