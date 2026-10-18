@@ -1,12 +1,18 @@
+import re
 from decimal import Decimal
 
 import httpx
 import pytest
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.baggage.propagation import W3CBaggagePropagator
+from opentelemetry.propagate import get_global_textmap
 from opentelemetry.sdk.metrics.export import MetricExportResult
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
-from opentelemetry.trace import StatusCode
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.util._once import Once
 
 from app.core.errors import AppError
 from app.core.metrics import track_order_request
@@ -24,6 +30,10 @@ ORDER = {
     "amount": 150000.50,
     "currency": "cop",
 }
+INCOMING_TRACE_ID = "0123456789abcdef0123456789abcdef"
+INCOMING_SPAN_ID = "0123456789abcdef"
+INCOMING_TRACEPARENT = f"00-{INCOMING_TRACE_ID}-{INCOMING_SPAN_ID}-01"
+_TRACEPARENT = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
 
 class _RecordingSpan:
@@ -308,3 +318,114 @@ def test_order_metrics_record_error_and_release_in_flight(monkeypatch: pytest.Mo
     rendered = str(recorded)
     assert "customer-001" not in rendered
     assert "trace_id" not in rendered
+
+
+class _MetricExporter:
+    _preferred_temporality: dict[object, object] = {}
+    _preferred_aggregation: dict[object, object] = {}
+
+    def export(self, metrics_data: object, **kwargs: object) -> MetricExportResult:
+        del metrics_data, kwargs
+        return MetricExportResult.SUCCESS
+
+    def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+
+    def force_flush(self, timeout_millis: float = 30000) -> bool:
+        del timeout_millis
+        return True
+
+
+class _LogExporter:
+    def export(self, batch: object, **kwargs: object) -> None:
+        del batch, kwargs
+
+    def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+
+    def force_flush(self, timeout_millis: float = 30000) -> bool:
+        del timeout_millis
+        return True
+
+
+async def test_outbound_call_propagates_incoming_traceparent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
+    monkeypatch.setattr(telemetry, "OTLPMetricExporter", lambda **_kwargs: _MetricExporter())
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda **_kwargs: _LogExporter())
+    monkeypatch.setattr(telemetry, "_setup_process_metrics", lambda: None)
+    previous_configured = telemetry._configured
+    telemetry._configured = False
+    memory = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_kwargs: memory)
+    monkeypatch.setattr(
+        telemetry,
+        "BatchSpanProcessor",
+        lambda exporter: SimpleSpanProcessor(exporter),
+    )
+    previous_provider = trace._TRACER_PROVIDER
+    previous_once = trace._TRACER_PROVIDER_SET_ONCE
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
+    captured: dict[str, str | None] = {}
+    application = None
+    finished: list[object] = []
+    propagators: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["traceparent"] = request.headers.get("traceparent")
+        return httpx.Response(
+            201,
+            content=b'{"id":"22222222-2222-2222-2222-222222222222","status":"PROCESSED"}',
+            headers={"content-type": "application/json"},
+        )
+
+    try:
+        application = create_app(transport=httpx.MockTransport(handler))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/orders",
+                json=ORDER,
+                headers={
+                    "X-Request-ID": REQUEST_ID,
+                    "traceparent": INCOMING_TRACEPARENT,
+                },
+            )
+        finished = list(memory.get_finished_spans())
+        propagators = list(getattr(get_global_textmap(), "_propagators", ()))
+    finally:
+        if application is not None:
+            await application.state.http_client.aclose()
+        telemetry.shutdown_telemetry()
+        telemetry._configured = previous_configured
+        trace._TRACER_PROVIDER = previous_provider
+        trace._TRACER_PROVIDER_SET_ONCE = previous_once
+
+    assert response.status_code == 201
+    traceparent = captured["traceparent"]
+    assert traceparent is not None
+    assert _TRACEPARENT.fullmatch(traceparent)
+    _version, trace_id, span_id, _flags = traceparent.split("-")
+    assert trace_id == INCOMING_TRACE_ID
+    assert span_id != INCOMING_SPAN_ID
+
+    spans = finished
+    server_spans = [span for span in spans if span.kind == SpanKind.SERVER]
+    client_spans = [span for span in spans if span.kind == SpanKind.CLIENT]
+    assert len(server_spans) == 1
+    assert len(client_spans) == 1
+    server_span = server_spans[0]
+    client_span = client_spans[0]
+    assert format(server_span.context.trace_id, "032x") == INCOMING_TRACE_ID
+    assert format(client_span.context.trace_id, "032x") == INCOMING_TRACE_ID
+    assert format(client_span.context.span_id, "016x") == span_id
+    assert server_span.parent is not None
+    assert format(server_span.parent.span_id, "016x") == INCOMING_SPAN_ID
+    assert client_span.parent is not None
+    assert client_span.parent.span_id == server_span.context.span_id
+    assert server_span.resource.attributes["service.name"] == "service-a"
+    assert client_span.resource.attributes["service.name"] == "service-a"
+    assert any(isinstance(item, TraceContextTextMapPropagator) for item in propagators)
+    assert any(isinstance(item, W3CBaggagePropagator) for item in propagators)

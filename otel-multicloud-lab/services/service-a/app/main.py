@@ -18,12 +18,12 @@ from app.services.order_service import OrderService
 _httpx_instrumented = False
 
 
-def _instrument_clients() -> None:
-    global _httpx_instrumented
+def _instrument_clients(client: httpx.AsyncClient) -> None:
     if sdk_disabled() or _httpx_instrumented:
         return
-    HTTPXClientInstrumentor().instrument()
-    _httpx_instrumented = True
+    if getattr(client, "_is_instrumented_by_opentelemetry", False):
+        return
+    HTTPXClientInstrumentor().instrument_client(client)
 
 
 def _instrument_fastapi(app: FastAPI) -> None:
@@ -70,7 +70,7 @@ def create_app(
     register_exception_handlers(app)
     app.include_router(api_router)
     setup_telemetry()
-    _instrument_clients()
+    _instrument_clients(http_client)
     _instrument_fastapi(app)
     return app
 

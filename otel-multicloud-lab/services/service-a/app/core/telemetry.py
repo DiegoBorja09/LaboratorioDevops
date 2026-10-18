@@ -82,17 +82,7 @@ def _shared_resource() -> Resource:
     return _resource
 
 
-def _setup_traces(resource: Resource) -> None:
-    if sdk_disabled():
-        return
-    current = trace.get_tracer_provider()
-    if isinstance(current, TracerProvider):
-        return
-    provider = TracerProvider(resource=resource)
-    endpoint = otlp_endpoint()
-    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=_insecure_endpoint(endpoint))
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
+def _install_propagators() -> None:
     set_global_textmap(
         CompositePropagator(
             [
@@ -101,6 +91,20 @@ def _setup_traces(resource: Resource) -> None:
             ]
         )
     )
+
+
+def _setup_traces(resource: Resource) -> None:
+    if sdk_disabled():
+        return
+    _install_propagators()
+    current = trace.get_tracer_provider()
+    if isinstance(current, TracerProvider):
+        return
+    provider = TracerProvider(resource=resource)
+    endpoint = otlp_endpoint()
+    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=_insecure_endpoint(endpoint))
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
 
 
 def _setup_metrics(resource: Resource) -> None:

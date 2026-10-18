@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import httpx
 from opentelemetry import trace
+from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode
 
 from app.core.config import Settings
@@ -104,14 +105,16 @@ class OrderService:
             route=_ROUTE,
             method=_METHOD,
         )
+        headers = {
+            "Content-Type": "application/json",
+            "X-Request-ID": request_id,
+        }
+        inject(headers)
         try:
             response = await self._client.post(
                 url,
                 content=body.encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Request-ID": request_id,
-                },
+                headers=headers,
                 timeout=httpx.Timeout(self._timeout),
             )
         except httpx.TimeoutException as exc:

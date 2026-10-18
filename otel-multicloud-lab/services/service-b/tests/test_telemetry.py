@@ -1,15 +1,21 @@
+import inspect
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.metrics.export import MetricExportResult
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
-from opentelemetry.trace import StatusCode
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, StatusCode
+from opentelemetry.util._once import Once
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import Settings
+from app.database.base import Base
+from app.models.order import Order
 from app.core.metrics import track_processing
 from app.main import create_app
 from app.repositories.order_repository import OrderRepository
@@ -418,3 +424,104 @@ def test_processing_metrics_record_database_error(monkeypatch: pytest.MonkeyPatc
     rendered = str(recorded)
     assert "customer-001" not in rendered
     assert "trace_id" not in rendered
+
+
+class _QuietMetricExporter:
+    _preferred_temporality: dict[object, object] = {}
+    _preferred_aggregation: dict[object, object] = {}
+
+    def export(self, metrics_data: object, **kwargs: object) -> MetricExportResult:
+        del metrics_data, kwargs
+        return MetricExportResult.SUCCESS
+
+    def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+
+    def force_flush(self, timeout_millis: float = 30000) -> bool:
+        del timeout_millis
+        return True
+
+
+class _QuietLogExporter:
+    def export(self, batch: object, **kwargs: object) -> None:
+        del batch, kwargs
+
+    def shutdown(self, timeout_millis: float = 30000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+
+    def force_flush(self, timeout_millis: float = 30000) -> bool:
+        del timeout_millis
+        return True
+
+
+async def test_incoming_traceparent_stays_the_server_span_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
+    monkeypatch.setattr(telemetry, "OTLPMetricExporter", lambda **_kwargs: _QuietMetricExporter())
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda **_kwargs: _QuietLogExporter())
+    monkeypatch.setattr(telemetry, "_setup_process_metrics", lambda: None)
+    previous_configured = telemetry._configured
+    telemetry._configured = False
+    memory = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_kwargs: memory)
+    monkeypatch.setattr(
+        telemetry,
+        "BatchSpanProcessor",
+        lambda exporter: SimpleSpanProcessor(exporter),
+    )
+    previous_provider = trace._TRACER_PROVIDER
+    previous_once = trace._TRACER_PROVIDER_SET_ONCE
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
+    _ = Order
+    application = None
+    finished: list[object] = []
+    incoming_trace_id = "0123456789abcdef0123456789abcdef"
+    incoming_span_id = "fedcba9876543210"
+
+    try:
+        application = create_app(_sqlite_settings(tmp_path))
+        async with application.state.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        transport_kwargs: dict[str, object] = {"app": application}
+        if "lifespan" in inspect.signature(ASGITransport.__init__).parameters:
+            transport_kwargs["lifespan"] = "off"
+        async with AsyncClient(
+            transport=ASGITransport(**transport_kwargs),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/orders/process",
+                json=ORDER,
+                headers={
+                    "X-Request-ID": REQUEST_ID,
+                    "traceparent": f"00-{incoming_trace_id}-{incoming_span_id}-01",
+                },
+            )
+        finished = list(memory.get_finished_spans())
+    finally:
+        if application is not None:
+            await application.state.engine.dispose()
+        telemetry.shutdown_telemetry()
+        telemetry._configured = previous_configured
+        trace._TRACER_PROVIDER = previous_provider
+        trace._TRACER_PROVIDER_SET_ONCE = previous_once
+
+    assert response.status_code == 201
+    server_spans = [span for span in finished if span.kind == SpanKind.SERVER]
+    assert len(server_spans) == 1
+    server_span = server_spans[0]
+    assert format(server_span.context.trace_id, "032x") == incoming_trace_id
+    assert server_span.parent is not None
+    assert server_span.parent.is_remote is True
+    assert format(server_span.parent.span_id, "016x") == incoming_span_id
+    assert server_span.resource.attributes["service.name"] == "service-b"
+    child_spans = [
+        span
+        for span in finished
+        if span.parent is not None and span.parent.span_id == server_span.context.span_id
+    ]
+    assert child_spans
+    assert all(format(span.context.trace_id, "032x") == incoming_trace_id for span in child_spans)
