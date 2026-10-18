@@ -38,3 +38,8 @@ application_default_credentials.json
 *-sa.json
 *.sqlite3
 *.db
+chaos/evidence/*
+!chaos/evidence/.gitkeep
+!chaos/evidence/charts/
+!chaos/evidence/charts/**
+!chaos/evidence/evidence-index.md

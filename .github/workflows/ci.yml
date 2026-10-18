@@ -45,6 +45,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/otel-multicloud-lab/services/service-b
         run: python -m pytest
 
+      - name: Validar artefactos de caos
+        run: python -m pytest chaos/tests
+
       - name: Construir las imágenes Docker
         run: |
           docker build --tag otel-multicloud-lab-service-a:ci services/service-a

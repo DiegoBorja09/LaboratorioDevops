@@ -1,0 +1,10 @@
+# Overlay de caos. Combinarlo con docker-compose.yml.
+# Solo service-b cambia de imagen y recibe NET_ADMIN.
+services:
+  service-b:
+    image: otel-multicloud-lab-service-b:chaos
+    build:
+      context: ./services/service-b
+      dockerfile: Dockerfile.chaos
+    cap_add:
+      - NET_ADMIN
