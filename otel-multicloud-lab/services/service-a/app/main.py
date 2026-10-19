@@ -13,6 +13,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.core.telemetry import sdk_disabled, setup_telemetry, shutdown_telemetry
+from app.services.id_token import GoogleIdTokenProvider, IdTokenProvider
 from app.services.order_service import OrderService
 
 _httpx_instrumented = False
@@ -37,9 +38,21 @@ def _instrument_fastapi(app: FastAPI) -> None:
     app.state.otel_instrumented = True
 
 
+def _token_provider_for(settings: Settings, injected: IdTokenProvider | None) -> IdTokenProvider | None:
+    if not settings.data_service_auth_enabled:
+        return None
+    if injected is not None:
+        return injected
+    audience = settings.data_service_token_audience
+    if audience is None:
+        return None
+    return GoogleIdTokenProvider(audience)
+
+
 def create_app(
     settings: Settings | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    token_provider: IdTokenProvider | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.service_name, resolved_settings.log_level)
@@ -65,7 +78,11 @@ def create_app(
     )
     app.state.settings = resolved_settings
     app.state.http_client = http_client
-    app.state.order_service = OrderService(http_client, resolved_settings)
+    app.state.order_service = OrderService(
+        http_client,
+        resolved_settings,
+        token_provider=_token_provider_for(resolved_settings, token_provider),
+    )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
     app.include_router(api_router)

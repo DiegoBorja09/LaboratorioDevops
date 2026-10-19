@@ -22,3 +22,21 @@ class ServiceTimeoutError(AppError):
             "service-b no respondió dentro del tiempo esperado",
             504,
         )
+
+
+class DataServiceError(AppError):
+    def __init__(self) -> None:
+        super().__init__(
+            "DATA_SERVICE_UNAVAILABLE",
+            "La orden se creó en service-b, pero no fue posible replicar el evento de auditoría",
+            502,
+        )
+
+
+class DataServiceTimeoutError(AppError):
+    def __init__(self) -> None:
+        super().__init__(
+            "DATA_SERVICE_TIMEOUT",
+            "La orden se creó en service-b, pero data-service no respondió a tiempo",
+            504,
+        )

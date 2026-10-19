@@ -7,3 +7,10 @@ service_b_timeout_seconds = 5
 log_level                 = "INFO"
 grafana_otlp_endpoint     = "https://otlp-gateway.example.invalid/otlp"
 grafana_otlp_auth         = "Basic REPLACE_WITH_BASE64"
+
+# Integrador. Deben seguir en false hasta la fase correspondiente.
+# No reemplaces un terraform.tfvars que ya tenga create_service = true.
+create_integrator_foundation = false
+create_data_service          = false
+create_data_migration_job    = false
+data_service_image_tag       = "lab"

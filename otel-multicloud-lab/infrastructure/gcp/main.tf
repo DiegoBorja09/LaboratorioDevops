@@ -5,6 +5,8 @@ locals {
 
   artifact_registry_repository_url = "${var.region}-docker.pkg.dev/${var.project_id}/${local.repository_id}"
   service_a_image                  = "${local.artifact_registry_repository_url}/service-a:${var.service_a_image_tag}"
+  data_service_image               = "${local.artifact_registry_repository_url}/data-service:${var.data_service_image_tag}"
+  integrator_subnet_cidr           = "10.80.0.0/24"
 
   labels = {
     project     = "otel-multicloud-lab"

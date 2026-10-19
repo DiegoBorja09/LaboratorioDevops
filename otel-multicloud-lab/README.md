@@ -1,6 +1,6 @@
 # otel-multicloud-lab
 
-Laboratorio académico de observabilidad. La aplicación base sigue igual: service-a, service-b y PostgreSQL. Ambos servicios exportan trazas, métricas y logs por OTLP hacia un OpenTelemetry Collector. Jaeger recibe las trazas, Prometheus consulta las métricas, Loki guarda los logs y Grafana muestra el dashboard y Explore.
+Laboratorio académico de observabilidad. La aplicación base sigue igual: service-a, service-b y PostgreSQL. Ambos servicios exportan trazas, métricas y logs por OTLP hacia un OpenTelemetry Collector. Jaeger recibe las trazas, Prometheus consulta las métricas, Loki guarda los logs y Grafana muestra el dashboard y Explore. data-service es un tercer servicio opcional: replica un evento de auditoría en dos bases PostgreSQL y también exporta telemetría por OTLP. El detalle está en el apartado 19.
 
 ## 1. Requisitos
 
@@ -20,6 +20,17 @@ Cliente → service-a → HTTP → service-b → PostgreSQL
 2. service-a valida el cuerpo con Pydantic, ejecuta `validate_order` y reenvía la orden con HTTPX, en un solo intento, a `POST /api/v1/orders/process`.
 3. service-b ejecuta `process_order`, guarda la fila en la tabla `orders` y responde `201`.
 4. service-a devuelve al cliente el resultado de service-b.
+5. Si `DATA_SERVICE_URL` está definida, service-a envía después el evento de auditoría a data-service. Si no está definida, el flujo termina en el paso anterior.
+
+```mermaid
+flowchart LR
+  serviceA[service-a] --> serviceB[service-b]
+  serviceA --> dataService[data-service]
+  dataService --> cloudSql[GCP Cloud SQL]
+  dataService --> rds[AWS RDS]
+```
+
+Esa réplica es un dual-write, no una transacción distribuida. La orden ya quedó guardada en service-b antes de llamar a data-service. data-service escribe primero en Cloud SQL y después en RDS. Si la segunda base falla, la primera conserva el evento y se puede reintentar con el mismo `event_id`.
 
 El header `X-Request-ID` viaja en la petición y en la respuesta. Si el cliente no lo envía, service-a genera un UUID. Los logs de consola siguen siendo JSON e incluyen `request_id`, método, ruta, código de estado y duración cuando esos datos existen. El `trace_id` y el `span_id` no se imprimen en esa línea de consola: OpenTelemetry los toma del span activo y Loki los guarda como etiquetas.
 
@@ -61,6 +72,17 @@ Copy-Item .env.example .env
 | `OTEL_SDK_DISABLED` | Apaga por completo el SDK y la instrumentación | `false` en el laboratorio; `true` en Pytest y en el baseline |
 | `GRAFANA_ADMIN_USER` | Usuario inicial de Grafana | `admin` |
 | `GRAFANA_ADMIN_PASSWORD` | Contraseña inicial de Grafana | `admin` |
+| `DATA_SERVICE_URL` | URL base opcional de data-service | `http://data-service:8080` |
+| `DATA_SERVICE_AUDIENCE` | Audience del ID token. Vacío usa `DATA_SERVICE_URL` | vacío en local |
+| `DATA_SERVICE_AUTH_ENABLED` | `true` adjunta `Authorization: Bearer` hacia data-service | `false` |
+| `DATA_SERVICE_TIMEOUT_SECONDS` | Timeout HTTP hacia data-service | `5` |
+| `GCP_DATABASE_URL` | Conexión async de data-service hacia Cloud SQL | en local, el PostgreSQL del laboratorio |
+| `AWS_DATABASE_URL` | Conexión async de data-service hacia RDS | en local, el mismo PostgreSQL del laboratorio |
+| `OTEL_DEPLOYMENT_ENVIRONMENT` | `deployment.environment` de data-service | `local` |
+| `CHAOS_ENABLED` | Caos de data-service | `false` |
+| `CHAOS_ERROR_RATE` | Probabilidad de fallo inyectado, de 0 a 1 | `0` |
+| `CHAOS_DELAY_MS` | Espera antes de escribir, en milisegundos | `0` |
+| `CHAOS_TOKEN` | Token del header `X-Chaos-Token` | vacío |
 
 Esas credenciales son solo del laboratorio local. No las reutilices en otro entorno. Compose ya las define, así que `docker compose up --build` no depende de un archivo `.env`.
 
@@ -78,6 +100,7 @@ Puertos locales:
 | --- | --- |
 | service-a | http://localhost:8081 |
 | service-b | http://localhost:8082 |
+| data-service | http://localhost:8083 |
 | PostgreSQL | `localhost:5433` |
 | Jaeger | http://localhost:16686 |
 | Prometheus | http://localhost:9090 |
@@ -87,7 +110,7 @@ Puertos locales:
 | OTel Collector HTTP | `localhost:4318` |
 | Salud del Collector | http://localhost:13133 |
 
-service-b espera a que PostgreSQL esté saludable, aplica las migraciones y después arranca Uvicorn. service-a espera a que service-b esté saludable.
+service-b espera a que PostgreSQL esté saludable, aplica las migraciones y después arranca Uvicorn. data-service aplica la migración de `audit_events` en cada URL y después arranca. service-a espera a que service-b y data-service estén saludables.
 
 ## 5. Migraciones
 
@@ -118,16 +141,19 @@ Set-Location ../..
 
 ## 6. Pruebas
 
-Las pruebas de service-a simulan HTTPX con `MockTransport` y no necesitan a service-b. Las de service-b usan SQLite en un archivo temporal, de modo que no hace falta levantar PostgreSQL para `pytest`. El esquema de PostgreSQL se comprueba al arrancar Compose, que aplica Alembic sobre una base vacía.
+Las pruebas de service-a simulan HTTPX con `MockTransport` y no necesitan a service-b. Las de service-b usan SQLite en un archivo temporal, de modo que no hace falta levantar PostgreSQL para `pytest`. Las de data-service usan almacenes falsos y tampoco necesitan PostgreSQL. El esquema de PostgreSQL se comprueba al arrancar Compose, que aplica Alembic sobre una base vacía.
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r services/service-a/requirements-dev.txt
 python -m pip install -r services/service-b/requirements-dev.txt
+python -m pip install -r services/data-service/requirements-dev.txt
 Set-Location services/service-a
 python -m pytest
 Set-Location ../service-b
+python -m pytest
+Set-Location ../data-service
 python -m pytest
 Set-Location ../..
 ```
@@ -489,15 +515,16 @@ Limitaciones: una sola corrida local, sin aislar CPU, con el calentamiento fuera
 
 ## 14. Integración continua
 
-El workflow está en la raíz del repositorio Git, en `.github/workflows/ci.yml`, porque el laboratorio vive en la carpeta `otel-multicloud-lab` y GitHub Actions no ejecuta workflows anidados. Se dispara en cada `push`, en cada `pull_request` y también se puede lanzar a mano. Comprueba que los dos servicios pasan sus pruebas, que sus imágenes Docker se construyen y que Terraform tiene formato y sintaxis válidos. No inicia sesión en AWS ni en GCP, no ejecuta `plan`, `apply` ni `destroy`, no publica imágenes y no crea recursos.
+El workflow está en la raíz del repositorio Git, en `.github/workflows/ci.yml`, porque el laboratorio vive en la carpeta `otel-multicloud-lab` y GitHub Actions no ejecuta workflows anidados. Se dispara en cada `push`, en cada `pull_request` y también se puede lanzar a mano. Comprueba que service-a, service-b y data-service pasan sus pruebas, que sus imágenes Docker se construyen y que Terraform tiene formato y sintaxis válidos en `infrastructure/aws` y `infrastructure/gcp`, incluido el integrador apagado. No inicia sesión en AWS ni en GCP, no ejecuta `plan`, `apply` ni `destroy`, no publica imágenes y no crea recursos.
 
 En orden hace esto:
 
 1. Instala las dependencias de service-a y ejecuta Pytest.
 2. Instala las dependencias de service-b y ejecuta Pytest.
-3. Construye las dos imágenes con `docker build` y las deja solo en el runner.
-4. Ejecuta `terraform fmt -check -recursive`.
-5. Ejecuta `terraform init -backend=false` y `terraform validate` en `infrastructure/aws` y en `infrastructure/gcp`.
+3. Instala las dependencias de data-service y ejecuta Pytest.
+4. Construye las tres imágenes con `docker build` y las deja solo en el runner.
+5. Ejecuta `terraform fmt -check -recursive`.
+6. Ejecuta `terraform init -backend=false` y `terraform validate` en `infrastructure/aws` y en `infrastructure/gcp`.
 
 `infrastructure/aws` declara el laboratorio de EC2, ECR y el grupo de logs. `infrastructure/gcp` declara Cloud Run, Artifact Registry y el secreto del collector. El pipeline solo comprueba formato y sintaxis: no inicia sesión en AWS ni en GCP, no publica imágenes y no crea recursos. Usa Terraform 1.16.5 y las acciones fijadas por el commit `actions/checkout` v7.0.1, `actions/setup-python` v7.0.0 y `hashicorp/setup-terraform` v4.0.1.
 
@@ -608,3 +635,49 @@ curl.exe "$((terraform -chdir=infrastructure/gcp output -raw service_a_url))/hea
 ```powershell
 terraform -chdir=infrastructure/gcp destroy
 ```
+
+## 19. data-service
+
+El código está en `services/data-service`. El detalle de variables, endpoints, métricas y ejecución local está en `services/data-service/README.md`.
+
+data-service escucha en el puerto 8080 del contenedor y en http://localhost:8083. `GET /health` solo confirma que el proceso está vivo. `GET /ready` ejecuta `SELECT 1` en las dos conexiones. `POST /api/v1/data/replicate` inserta el mismo evento en ambas y trata `event_id` como clave idempotente.
+
+```mermaid
+flowchart LR
+  serviceA[service-a] --> serviceB[service-b]
+  serviceA --> dataService[data-service]
+  dataService --> cloudSql[GCP Cloud SQL]
+  dataService --> rds[AWS RDS]
+```
+
+`GCP_DATABASE_URL` y `AWS_DATABASE_URL` no se versionan con contraseñas ni hosts cloud. En Compose las dos apuntan al PostgreSQL local del laboratorio, con el usuario y la contraseña que ya usa service-b. El caos queda apagado: `CHAOS_ENABLED=false`, tasa 0 y token vacío.
+
+service-a solo llama a data-service cuando `DATA_SERVICE_URL` tiene valor, y lo hace después de una respuesta exitosa de service-b. Propaga `traceparent`, `baggage` y `X-Request-ID` con el cliente HTTPX ya instrumentado. Si data-service falla, service-a responde `502` o `504` y no vuelve a crear la orden. La orden que ya guardó service-b permanece. No hay transacción distribuida: un fallo entre las dos bases puede dejar el evento solo en Cloud SQL, y un reintento con el mismo `event_id` completa el lado que faltaba.
+
+## 20. Despliegue del integrador
+
+Terraform deja data-service preparado y apagado. `create_instance` y `create_service` no cambian. Ningún comando de este apartado se ejecutó al escribirlo: no hay `apply`, `destroy`, AWS CLI, gcloud ni `docker push` en esta fase. El detalle está en `infrastructure/gcp/README.md` y `infrastructure/aws/README.md`.
+
+```text
+Cliente
+  -> service-a en Cloud Run
+      -> service-b en EC2
+      -> data-service en Cloud Run
+          -> Cloud SQL PostgreSQL
+          -> AWS RDS PostgreSQL
+```
+
+Cloud Run sale por Direct VPC Egress y una Cloud NAT con IP fija. RDS solo acepta TCP 5432 desde esa IP en `/32` y exige SSL. Cloud SQL se monta en `/cloudsql` y no autoriza `0.0.0.0/0`.
+
+Edita los `terraform.tfvars` que ya existen. No los sustituyas por los ejemplos y no los subas a Git.
+
+1. GCP: `create_integrator_foundation = true`, `create_data_service = false`. Aplica y lee `cloud_run_egress_cidr`.
+2. AWS: `create_integrator_data = true` y `gcp_egress_cidr` con ese `/32`. Aplica. Ahí nace RDS. La contraseña queda en Secrets Manager.
+3. Desde la raíz del repositorio: `.\otel-multicloud-lab\scripts\provision-integrator-secrets.ps1`. Comprueba que `data-service-aws-database-url` tenga una versión habilitada. El script no imprime la URL.
+4. Construye y publica `data-service:lab` en el Artifact Registry que ya existe. La URL sale de `data_service_image_url`.
+5. GCP: `create_data_service = true` y `create_data_migration_job = true`. Aplica. Después ejecuta el job `otel-multicloud-lab-data-migrate`. El apply no migra: el servicio arranca con `DATA_SERVICE_SKIP_MIGRATIONS=true` y el job es el que corre Alembic, primero Cloud SQL y luego RDS.
+6. Llama a `/health` y `/ready` con un identity token. data-service no es público. El invoker previsto es la cuenta de service-a. Cuando `create_data_service` es true, Terraform pone en service-a `DATA_SERVICE_URL`, `DATA_SERVICE_AUDIENCE` y `DATA_SERVICE_AUTH_ENABLED=true`. En local esa autenticación queda en `false`.
+
+Para destruir, invierte el orden: apaga Cloud Run y el job, destruye RDS, y al final apaga la fundación de GCP. Revisa que no queden discos, snapshots, la IP estática ni secretos facturables. Devolver una variable a `false` y aplicar borra los recursos de ese interruptor. No hagas eso con `create_instance` ni con `create_service` si esas piezas deben seguir vivas.
+
+Cloud SQL es `db-f1-micro`, zonal, 10 GB, sin backups: mientras la fundación esté activa, la instancia factura y un fallo no tiene copia. RDS es `db.t4g.micro`, 20 GB gp3, una zona, sin backups ni snapshot final. La IP de Cloud NAT también factura mientras siga reservada.

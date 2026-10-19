@@ -64,11 +64,11 @@ variable "grafana_otlp_endpoint" {
   default     = ""
 
   validation {
-    condition = !var.create_service || (
+    condition = !(var.create_service || var.create_data_service || var.create_data_migration_job) || (
       length(trimspace(var.grafana_otlp_endpoint)) > 0 &&
       !strcontains(var.grafana_otlp_endpoint, "example.invalid")
     )
-    error_message = "grafana_otlp_endpoint debe ser la URL real de Grafana Cloud cuando create_service es true."
+    error_message = "grafana_otlp_endpoint debe ser la URL real de Grafana Cloud cuando se crea un Cloud Run con collector."
   }
 }
 
@@ -79,11 +79,11 @@ variable "grafana_otlp_auth" {
   default     = ""
 
   validation {
-    condition = !var.create_service || (
+    condition = !(var.create_service || var.create_data_service || var.create_data_migration_job) || (
       length(trimspace(var.grafana_otlp_auth)) > 0 &&
       !strcontains(var.grafana_otlp_auth, "REPLACE_WITH")
     )
-    error_message = "grafana_otlp_auth debe ser el header Basic real cuando create_service es true."
+    error_message = "grafana_otlp_auth debe ser el header Basic real cuando se crea un Cloud Run con collector."
   }
 }
 
@@ -95,5 +95,44 @@ variable "log_level" {
   validation {
     condition     = contains(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], var.log_level)
     error_message = "log_level debe ser DEBUG, INFO, WARNING, ERROR o CRITICAL."
+  }
+}
+
+variable "create_integrator_foundation" {
+  description = "false no crea red, Cloud SQL ni secretos de data-service. true crea esa fundación y deja Cloud Run apagado."
+  type        = bool
+  default     = false
+}
+
+variable "create_data_service" {
+  description = "true crea el Cloud Run privado de data-service. Requiere la fundación, la imagen publicada y la versión del secreto de RDS."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.create_data_service || var.create_integrator_foundation
+    error_message = "create_data_service requiere create_integrator_foundation."
+  }
+}
+
+variable "create_data_migration_job" {
+  description = "true crea el Cloud Run Job de Alembic. El apply no lo ejecuta."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.create_data_migration_job || var.create_integrator_foundation
+    error_message = "create_data_migration_job requiere create_integrator_foundation."
+  }
+}
+
+variable "data_service_image_tag" {
+  description = "Etiqueta de data-service en el Artifact Registry existente."
+  type        = string
+  default     = "lab"
+
+  validation {
+    condition     = length(trimspace(var.data_service_image_tag)) > 0
+    error_message = "La etiqueta de data-service no puede estar vacía."
   }
 }

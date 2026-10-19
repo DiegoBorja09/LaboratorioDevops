@@ -80,6 +80,30 @@ resource "google_cloud_run_v2_service" "service_a" {
         value = "gcp"
       }
 
+      dynamic "env" {
+        for_each = var.create_data_service && var.create_integrator_foundation ? [1] : []
+        content {
+          name  = "DATA_SERVICE_URL"
+          value = google_cloud_run_v2_service.data_service[0].uri
+        }
+      }
+
+      dynamic "env" {
+        for_each = var.create_data_service && var.create_integrator_foundation ? [1] : []
+        content {
+          name  = "DATA_SERVICE_AUDIENCE"
+          value = google_cloud_run_v2_service.data_service[0].uri
+        }
+      }
+
+      dynamic "env" {
+        for_each = var.create_data_service && var.create_integrator_foundation ? [1] : []
+        content {
+          name  = "DATA_SERVICE_AUTH_ENABLED"
+          value = "true"
+        }
+      }
+
       depends_on = ["collector"]
     }
 
@@ -129,6 +153,13 @@ resource "google_cloud_run_v2_service" "service_a" {
     google_secret_manager_secret_version.collector_config,
     google_artifact_registry_repository_iam_member.cloud_run_agent,
   ]
+
+  lifecycle {
+    ignore_changes = [
+      client,
+      client_version,
+    ]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "public" {

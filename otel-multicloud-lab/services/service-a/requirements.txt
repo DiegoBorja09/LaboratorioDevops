@@ -3,6 +3,8 @@ uvicorn==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
 httpx==0.28.1
+google-auth==2.40.3
+requests==2.32.5
 # LoggerProvider, LoggingHandler, BatchLogRecordProcessor y OTLPLogExporter
 # forman parte de estas dos versiones. No añadas otro paquete de logs.
 opentelemetry-api==1.45.1

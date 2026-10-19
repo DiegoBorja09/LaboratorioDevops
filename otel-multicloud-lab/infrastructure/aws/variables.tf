@@ -89,3 +89,40 @@ variable "postgres_db" {
   type        = string
   default     = "orders_db"
 }
+
+variable "create_integrator_data" {
+  description = "false no crea RDS. true crea el PostgreSQL público solo desde la IP de Cloud NAT."
+  type        = bool
+  default     = false
+}
+
+variable "gcp_egress_cidr" {
+  description = "IPv4 /32 de Cloud NAT. Null mientras create_integrator_data es false. 0.0.0.0/0 está prohibido."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.gcp_egress_cidr == null || (
+      can(cidrhost(var.gcp_egress_cidr, 0)) &&
+      endswith(var.gcp_egress_cidr, "/32") &&
+      strcontains(var.gcp_egress_cidr, ".") &&
+      !strcontains(var.gcp_egress_cidr, ":") &&
+      !startswith(var.gcp_egress_cidr, "0.0.0.0/")
+    )
+    error_message = "gcp_egress_cidr debe ser null o una IPv4 /32. 0.0.0.0/0 está prohibido."
+  }
+
+  validation {
+    condition = !var.create_integrator_data || (
+      var.gcp_egress_cidr != null &&
+      can(cidrhost(var.gcp_egress_cidr, 0)) &&
+      endswith(var.gcp_egress_cidr, "/32") &&
+      strcontains(var.gcp_egress_cidr, ".") &&
+      !strcontains(var.gcp_egress_cidr, ":") &&
+      var.gcp_egress_cidr != "0.0.0.0/0" &&
+      !startswith(var.gcp_egress_cidr, "0.0.0.0/")
+    )
+    error_message = "Cuando create_integrator_data es true, gcp_egress_cidr debe ser una IPv4 /32 y no puede ser 0.0.0.0/0."
+  }
+}

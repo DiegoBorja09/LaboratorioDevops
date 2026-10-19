@@ -3,6 +3,10 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.core.config import Settings
+from app.main import create_app
 
 REQUEST_ID = "11111111-1111-1111-1111-111111111111"
 ORDER = {
@@ -166,3 +170,68 @@ async def test_rejected_amounts_do_not_call_service_b(build_client, amount: int)
     )
 
     assert response.status_code == 422
+
+
+def _settings_with_data_service() -> Settings:
+    return Settings(
+        service_name="service-a",
+        service_b_url="http://service-b:8080",
+        service_b_timeout_seconds=5,
+        data_service_url="http://data-service:8080",
+        log_level="INFO",
+    )
+
+
+async def test_successful_order_replicates_the_audit_event() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/replicate"):
+            return httpx.Response(201, json={"status": "replicated"})
+        return httpx.Response(
+            201,
+            content=_processed_body(request),
+            headers={"content-type": "application/json"},
+        )
+
+    application = create_app(settings=_settings_with_data_service(), transport=httpx.MockTransport(handler))
+    async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test") as client:
+        response = await client.post("/api/v1/orders", json=ORDER, headers={"X-Request-ID": REQUEST_ID})
+    await application.state.http_client.aclose()
+
+    assert response.status_code == 201
+    assert response.json()["id"] == "22222222-2222-2222-2222-222222222222"
+    assert [request.url.path for request in calls] == ["/api/v1/orders/process", "/api/v1/data/replicate"]
+    replicated = json.loads(calls[1].content)
+    assert replicated["order_id"] == "22222222-2222-2222-2222-222222222222"
+    assert replicated["source_service"] == "service-a"
+    assert replicated["status"] == "created"
+    assert replicated["event_id"]
+    assert calls[1].headers["X-Request-ID"] == REQUEST_ID
+
+
+async def test_data_service_failure_does_not_create_another_order() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/replicate"):
+            return httpx.Response(503, json={"error": {"code": "REPLICATION_FAILED"}})
+        return httpx.Response(
+            201,
+            content=_processed_body(request),
+            headers={"content-type": "application/json"},
+        )
+
+    application = create_app(settings=_settings_with_data_service(), transport=httpx.MockTransport(handler))
+    async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test") as client:
+        response = await client.post("/api/v1/orders", json=ORDER, headers={"X-Request-ID": REQUEST_ID})
+    await application.state.http_client.aclose()
+
+    assert calls == ["/api/v1/orders/process", "/api/v1/data/replicate"]
+    assert response.status_code == 502
+    body = response.json()
+    assert body["error"]["code"] == "DATA_SERVICE_UNAVAILABLE"
+    assert body["error"]["request_id"] == REQUEST_ID
+    assert "service-b" in body["error"]["message"]

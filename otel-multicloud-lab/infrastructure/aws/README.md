@@ -6,7 +6,7 @@ Una instancia EC2 en `us-east-1` corre tres contenedores sobre una red Docker pr
 2. AWS Distro for OpenTelemetry Collector `v0.50.0`. OTLP queda solo en la red Docker.
 3. `service-b`, publicado en el host como TCP `8082` hacia el `8080` del contenedor.
 
-La instancia usa la VPC predeterminada y una subred pública que ya asigna IPv4 pública. El disco raíz es gp3, cifrado y de 8 GB. No hay llave SSH: el rol de instancia incluye `AmazonSSMManagedInstanceCore`. El grupo de seguridad acepta desde Internet únicamente TCP 8082. La salida queda abierta para que la instancia llegue a Systems Manager, ECR, Docker Hub, CloudWatch y X-Ray sin NAT Gateway ni endpoints de VPC.
+RDS para data-service es opcional y queda apagado mientras `create_integrator_data` es `false`. La instancia de service-b usa la VPC predeterminada y una subred pública que ya asigna IPv4 pública. El disco raíz es gp3, cifrado y de 8 GB. No hay llave SSH: el rol de instancia incluye `AmazonSSMManagedInstanceCore`. El grupo de seguridad acepta desde Internet únicamente TCP 8082. La salida queda abierta para que la instancia llegue a Systems Manager, ECR, Docker Hub, CloudWatch y X-Ray sin NAT Gateway ni endpoints de VPC.
 
 El repositorio ECR `otel-multicloud-lab-service-b` es privado, escanea cada imagen al publicarla y conserva como máximo 3. La contraseña de PostgreSQL sale de `random_password`, no de un archivo. Terraform la marca sensible y la inyecta en `user_data`. El state queda fuera de Git.
 
@@ -147,3 +147,60 @@ X-Ray y CloudWatch siguen recibiendo la misma telemetría.
 - La IPv4 pública es la automática de la subred. Cambia si la instancia se detiene. No hay Elastic IP.
 - Quien aplica necesita permisos para crear estos recursos. El pipeline de GitHub solo ejecuta `fmt`, `init -backend=false` y `validate`.
 - `grafana_otlp_auth` es sensible. El ejemplo versionado usa un placeholder que el plan rechaza cuando `create_instance` es true.
+
+## Integrador: RDS para data-service
+
+`create_integrator_data` vale `false`. No cambies `create_instance`. Si lo devuelves a `false` mientras la EC2 exista, un apply la elimina. Lo mismo pasa con RDS si devuelves `create_integrator_data` a `false`.
+
+Con el interruptor en `true`, Terraform crea en la VPC predeterminada:
+
+- un Security Group que acepta TCP 5432 solo desde `gcp_egress_cidr`
+- un DB subnet group con las subredes default de al menos dos zonas
+- un parameter group `postgres16` con `rds.force_ssl=1`
+- una instancia `otel-multicloud-lab-data`
+
+No crea NAT Gateway, ni abre `0.0.0.0/0`, ni SSH. RDS es `db.t4g.micro`, PostgreSQL 16, una sola zona, 20 GB gp3 cifrados, sin Multi-AZ, sin réplicas, sin Enhanced Monitoring y sin Performance Insights. `backup_retention_period = 0`, `deletion_protection = false`, `skip_final_snapshot = true` y `apply_immediately = true`. `publicly_accessible = true` solo para que Cloud Run, saliendo por la IP de Cloud NAT, pueda llegar. La contraseña la administra RDS en Secrets Manager (`manage_master_user_password`). No está en tfvars ni en un output. El output sensible es el ARN del secreto.
+
+La base y el usuario se llaman `otel_integrator` y `data_service`. Los tags `Project=otel-multicloud-lab`, `Environment=university-lab` y `Component=integrator-data` identifican estos recursos.
+
+`gcp_egress_cidr` tiene que ser una IPv4 `/32` cuando el interruptor está en `true`. En `false` puede ser `null`. `0.0.0.0/0` no pasa la validación.
+
+### Orden
+
+Edita el tfvars existente. No lo sustituyas por el ejemplo y no pegues una IP real en Git.
+
+1. En GCP, con `create_integrator_foundation = true` y `create_data_service = false`, aplica y copia `cloud_run_egress_cidr`.
+2. En el tfvars de AWS:
+
+```hcl
+create_integrator_data = true
+gcp_egress_cidr        = "203.0.113.10/32"
+```
+
+Sustituye el CIDR de documentación por el output. Después:
+
+```powershell
+terraform -chdir=infrastructure/aws plan
+terraform -chdir=infrastructure/aws apply
+```
+
+3. Desde la raíz del repositorio Git, sin imprimir secretos:
+
+```powershell
+.\otel-multicloud-lab\scripts\provision-integrator-secrets.ps1 -GcpProjectId PROYECTO -AwsRegion us-east-1
+```
+
+El script lee el endpoint, el puerto, el nombre de la base y el ARN. Arma la URL con `ssl=require`, la carga como versión de `data-service-aws-database-url` y borra el archivo temporal. Respeta `AWS_CA_BUNDLE` y no desactiva TLS.
+
+4. Publica la imagen de data-service y crea Cloud Run. Está en `infrastructure/gcp/README.md`.
+5. Ejecuta el job de migración. Terraform no lo lanza.
+6. Comprueba `/health` y `/ready` con un identity token.
+
+### Destrucción, al revés
+
+1. Apaga data-service y el job en GCP (`create_data_service` y `create_data_migration_job` en `false`) y aplica.
+2. `create_integrator_data = false` y aplica AWS. RDS se borra sin snapshot final. No toques `create_instance`.
+3. `create_integrator_foundation = false` y aplica GCP. Se van Cloud SQL, NAT, la IP y la red.
+4. Confirma que no quedan la instancia RDS, snapshots, la IP estática ni los secretos `data-service-*`.
+
+Los cuatro recursos de RDS llevan `Component=integrator-data` para distinguirlos de la EC2.

@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from uuid import uuid4
 
 import httpx
 from opentelemetry import trace
@@ -8,10 +9,17 @@ from opentelemetry.propagate import inject
 from opentelemetry.trace import Status, StatusCode
 
 from app.core.config import Settings
-from app.core.errors import AppError, ServiceTimeoutError, ServiceUnavailableError
+from app.core.errors import (
+    AppError,
+    DataServiceError,
+    DataServiceTimeoutError,
+    ServiceTimeoutError,
+    ServiceUnavailableError,
+)
 from app.core.logging import log_event
-from app.core.serialization import dumps
+from app.core.serialization import dumps, loads
 from app.schemas.order import OrderCreate
+from app.services.id_token import IdTokenError, IdTokenProvider
 
 logger = logging.getLogger("app.orders")
 _CENT = Decimal("0.01")
@@ -72,10 +80,19 @@ class DownstreamResult:
 
 
 class OrderService:
-    def __init__(self, client: httpx.AsyncClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        settings: Settings,
+        token_provider: IdTokenProvider | None = None,
+    ) -> None:
         self._client = client
         self._base_url = settings.service_b_url.rstrip("/")
         self._timeout = settings.service_b_timeout_seconds
+        self._data_service_url = settings.data_service_url or ""
+        self._data_service_timeout = settings.data_service_timeout_seconds
+        self._authenticate_data_service = settings.data_service_auth_enabled
+        self._token_provider = token_provider
 
     async def submit(self, order: OrderCreate, request_id: str) -> DownstreamResult:
         validated = validate_order(order)
@@ -155,6 +172,9 @@ class OrderService:
             )
             raise ServiceUnavailableError()
 
+        if self._data_service_url and response.status_code < 300:
+            await self._replicate(response.content, request_id)
+
         log_event(
             logger,
             logging.INFO,
@@ -165,3 +185,92 @@ class OrderService:
             method=_METHOD,
         )
         return DownstreamResult(status_code=response.status_code, body=response.content)
+
+    async def _replicate(self, body: bytes, request_id: str) -> None:
+        payload = dumps(
+            {
+                "event_id": str(uuid4()),
+                "order_id": self._order_id(body),
+                "source_service": "service-a",
+                "status": "created",
+            }
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "X-Request-ID": request_id,
+        }
+        inject(headers)
+        if self._authenticate_data_service:
+            headers["Authorization"] = f"Bearer {await self._id_token()}"
+        try:
+            response = await self._client.post(
+                f"{self._data_service_url}/api/v1/data/replicate",
+                content=payload.encode("utf-8"),
+                headers=headers,
+                timeout=httpx.Timeout(self._data_service_timeout),
+            )
+        except httpx.TimeoutException as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "Replicación de auditoría fallida",
+                "order.replication.failed",
+                result="error",
+                error_type="DATA_SERVICE_TIMEOUT",
+                route=_ROUTE,
+                method=_METHOD,
+            )
+            raise DataServiceTimeoutError() from exc
+        except httpx.RequestError as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "Replicación de auditoría fallida",
+                "order.replication.failed",
+                result="error",
+                error_type="DATA_SERVICE_UNAVAILABLE",
+                route=_ROUTE,
+                method=_METHOD,
+            )
+            raise DataServiceError() from exc
+        if response.status_code >= 400:
+            log_event(
+                logger,
+                logging.ERROR,
+                "Replicación de auditoría fallida",
+                "order.replication.failed",
+                result="error",
+                error_type="DATA_SERVICE_UNAVAILABLE",
+                route=_ROUTE,
+                method=_METHOD,
+            )
+            raise DataServiceError()
+
+    async def _id_token(self) -> str:
+        if self._token_provider is None:
+            logger.error(
+                "No fue posible obtener el ID token",
+                extra={"error.type": "IdTokenError"},
+            )
+            raise DataServiceError()
+        try:
+            return await self._token_provider.get_token()
+        except IdTokenError:
+            raise DataServiceError() from None
+        except Exception as exc:
+            logger.error(
+                "No fue posible obtener el ID token",
+                extra={"error.type": type(exc).__name__},
+            )
+            raise DataServiceError() from None
+
+    @staticmethod
+    def _order_id(body: bytes) -> str:
+        try:
+            payload = loads(body)
+        except (ValueError, UnicodeError) as exc:
+            raise DataServiceError() from exc
+        order_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(order_id, str) or not order_id:
+            raise DataServiceError()
+        return order_id

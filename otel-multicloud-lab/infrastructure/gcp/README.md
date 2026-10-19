@@ -1,6 +1,6 @@
 # GCP: service-a en Cloud Run
 
-service-a corre en Cloud Run, en `us-east1`, junto al service-b de AWS `us-east-1`. El servicio escala a cero, admite como máximo una instancia y no usa balanceador, dominio, VPC, NAT, Cloud SQL ni IP fija.
+service-a corre en Cloud Run, en `us-east1`, junto al service-b de AWS `us-east-1`. El servicio escala a cero, admite como máximo una instancia y no usa balanceador, dominio, VPC, NAT, Cloud SQL ni IP fija. data-service, en el apartado final, sí usa una VPC propia, Cloud NAT y Cloud SQL, y permanece apagado mientras sus variables están en `false`.
 
 Un sidecar del Google-Built OpenTelemetry Collector `0.162.0` escucha OTLP solo en `localhost:4317` y `localhost:4318`. Su health check está en `0.0.0.0:13133`. Los pipelines de trazas, métricas y logs exportan solo a Grafana Cloud por OTLP HTTP. El exporter hacia `telemetry.googleapis.com` salió de esos pipelines para evitar los fallos por IPv6. El token entra en Secret Manager al aplicar, no en Git.
 
@@ -131,3 +131,105 @@ Cada contenedor usa 1 vCPU y 512 MiB. Cloud Run de segunda generación, necesari
 - El probe oficial usa timeout y periodo de 30 segundos. Terraform exige que el timeout sea menor que el periodo, así que quedaron en 10 y 30 segundos.
 - El pipeline solo ejecuta `fmt`, `init -backend=false` y `validate`. No inicia sesión en GCP.
 - `grafana_otlp_auth` es sensible. El ejemplo versionado usa un placeholder que el plan rechaza cuando `create_service` es true.
+
+## Integrador: data-service
+
+Estos recursos nacen apagados. No cambies `create_service`. Volver a poner un interruptor en `false` y aplicar destruye solo lo que ese interruptor creó.
+
+| Variable | Default | Qué crea |
+| --- | --- | --- |
+| `create_integrator_foundation` | `false` | VPC `otel-lab-integrator`, subred `10.80.0.0/24`, Flow Logs, Cloud Router, IP estática, Cloud NAT, Cloud SQL, secretos y la cuenta `otel-lab-data-service` |
+| `create_data_service` | `false` | Cloud Run privado `otel-multicloud-lab-data-service` |
+| `create_data_migration_job` | `false` | Cloud Run Job `otel-multicloud-lab-data-migrate`, sin ejecutarlo |
+| `data_service_image_tag` | `lab` | Solo entra en la URL de la imagen |
+
+La subred `10.80.0.0/24` no coincide con la red default de GCP ni con `172.31.0.0/16` de la VPC default de AWS. Tiene Private Google Access y Flow Logs cada 30 segundos, con muestreo `0.5` y metadatos incluidos. El intervalo corto es para ver tráfico durante el laboratorio; el volumen es bajo y la red es temporal. No hay Serverless VPC Access Connector: Cloud Run usa Direct VPC Egress y `ALL_TRAFFIC`, para que RDS vea la IP de Cloud NAT.
+
+Cloud SQL es PostgreSQL 16, `db-f1-micro`, zonal, disco SSD de 10 GB sin crecimiento automático y sin alta disponibilidad. Los backups y la recuperación a un punto en el tiempo quedan apagados: es un laboratorio temporal y esa es la opción más barata; no hay protección ante un borrado accidental. `deletion_protection` está en `false`. La instancia puede tener IPv4 pública, pero no tiene redes autorizadas: no se abre `0.0.0.0/0`. data-service entra por el socket `/cloudsql` con la cuenta `roles/cloudsql.client`. Las conexiones directas, si alguien las habilitara, exigirían SSL.
+
+La contraseña de `data_service` sale de `random_password` y se guarda, ya dentro de la URL `postgresql+asyncpg`, en el secreto `data-service-gcp-database-url`. `CHAOS_TOKEN` se genera igual y vive en `data-service-chaos-token`. Ninguno de los dos se exporta. `data-service-aws-database-url` se crea vacío: la versión la agrega `scripts/provision-integrator-secrets.ps1` después de RDS. La cuenta `otel-lab-data-service` solo lee esos secretos y el secreto del collector. Además tiene `roles/logging.logWriter`, `roles/monitoring.metricWriter` y `roles/cloudtrace.agent`, los mismos roles de telemetría que service-a. No recibe `roles/secretmanager.secretAccessor` de proyecto.
+
+La imagen reutiliza el repositorio `otel-multicloud-lab`:
+
+```text
+us-east1-docker.pkg.dev/<project>/otel-multicloud-lab/data-service:lab
+```
+
+`terraform output -raw data_service_image_url` imprime la URL real del proyecto. Terraform no construye ni publica la imagen.
+
+Cloud Run, cuando `create_data_service` pasa a `true`, usa 1 vCPU y 512 MiB por contenedor, escala de 0 a 1 y monta Cloud SQL en `/cloudsql`. El sidecar es el mismo collector `0.162.0` y el mismo secreto de configuración que service-a. El servicio no tiene binding `allUsers`. El único `roles/run.invoker` es la cuenta de service-a. `DATA_SERVICE_URL` no se escribe todavía en service-a. `DATA_SERVICE_SKIP_MIGRATIONS=true` evita que el arranque de la revisión ejecute Alembic.
+
+El plan de Cloud Run lee la última versión de `data-service-aws-database-url`. Sin esa versión, la fase del servicio se detiene. Con `create_data_service = false` la fundación se puede aplicar aunque el secreto siga vacío.
+
+Cuando `create_data_service` y la fundación están activos, service-a recibe `DATA_SERVICE_URL` y `DATA_SERVICE_AUDIENCE` con la URL base de data-service, y `DATA_SERVICE_AUTH_ENABLED=true`. Esas variables no se agregan si data-service no existe, así que no hay un índice inválido ni una dependencia circular: data-service no referencia el recurso de service-a. El binding `roles/run.invoker` sigue siendo solo la cuenta de service-a. data-service no pasa a ser público.
+
+El job usa la misma imagen, los dos secretos de base, el socket y la misma salida por Cloud NAT. Su comando es el entrypoint, que migra primero Cloud SQL y después RDS, y luego termina. Alembic se puede repetir. `terraform apply` crea el job y no lo ejecuta.
+
+### Orden
+
+No pegues estos comandos con valores reales. Edita el `terraform.tfvars` que ya existe; no lo sustituyas por el ejemplo.
+
+1. Fundación, sin Cloud Run:
+
+```powershell
+# create_integrator_foundation = true
+# create_data_service = false
+# create_data_migration_job = false
+terraform -chdir=infrastructure/gcp plan
+terraform -chdir=infrastructure/gcp apply
+terraform -chdir=infrastructure/gcp output -raw cloud_run_egress_cidr
+```
+
+El output es una IPv4 `/32`, por ejemplo la forma `203.0.113.10/32`.
+
+2. Con ese CIDR, crea RDS en AWS. El procedimiento está en `infrastructure/aws/README.md`.
+
+3. Desde la raíz del repositorio Git:
+
+```powershell
+.\otel-multicloud-lab\scripts\provision-integrator-secrets.ps1 -GcpProjectId PROYECTO -GcpRegion us-east1 -AwsRegion us-east-1
+gcloud secrets versions list data-service-aws-database-url --project PROYECTO --filter="state=ENABLED" --limit=1
+```
+
+El script no imprime la URL ni la contraseña. El listado solo muestra el nombre de la versión.
+
+4. Publica la imagen. No forma parte de Terraform:
+
+```powershell
+$image = terraform -chdir=infrastructure/gcp output -raw data_service_image_url
+gcloud auth configure-docker us-east1-docker.pkg.dev
+docker build --platform linux/amd64 --tag $image services/data-service
+docker push $image
+```
+
+5. Servicio y job, todavía sin ejecutar la migración:
+
+```powershell
+# create_data_service = true
+# create_data_migration_job = true
+terraform -chdir=infrastructure/gcp plan
+terraform -chdir=infrastructure/gcp apply
+gcloud run jobs execute otel-multicloud-lab-data-migrate --project PROYECTO --region us-east1 --wait
+```
+
+6. `/health` y `/ready` con un identity token. No guardes el token. Una cuenta sin permiso de invocación recibe 403. El binding permanente es solo la cuenta de service-a; un Owner del proyecto también puede invocar. No agregues `allUsers`.
+
+```powershell
+$url = terraform -chdir=infrastructure/gcp output -raw data_service_url
+$token = gcloud auth print-identity-token
+curl.exe -H "Authorization: Bearer $token" "$url/health"
+curl.exe -H "Authorization: Bearer $token" "$url/ready"
+```
+
+`/ready` necesita las dos bases y la migración ya aplicada.
+
+### Destrucción, al revés
+
+No pongas `create_service` en `false`: eso borraría service-a.
+
+1. `create_data_service = false` y `create_data_migration_job = false`. Aplica GCP. Desaparece Cloud Run y el job.
+2. `create_integrator_data = false` en AWS y aplica. Desaparece RDS, sin snapshot final.
+3. `create_integrator_foundation = false` y aplica GCP. Desaparecen Cloud SQL, los tres secretos de data-service, la cuenta, Cloud NAT, la IP estática y la VPC.
+4. En las consolas, confirma que no quedan discos, snapshots, la IP estática ni secretos de data-service. Las APIs del proyecto siguen habilitadas. Cloud SQL sin backups no debería dejar copias; revísalo igual porque la instancia factura mientras existe.
+
+Volver a `false` y aplicar destruye esos recursos. La próxima fundación genera otra contraseña y otro token.

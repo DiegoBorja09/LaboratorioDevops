@@ -14,6 +14,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util._once import Once
 
+from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.metrics import track_order_request
 from app.core.telemetry import setup_telemetry
@@ -429,3 +430,84 @@ async def test_outbound_call_propagates_incoming_traceparent(monkeypatch: pytest
     assert client_span.resource.attributes["service.name"] == "service-a"
     assert any(isinstance(item, TraceContextTextMapPropagator) for item in propagators)
     assert any(isinstance(item, W3CBaggagePropagator) for item in propagators)
+
+
+async def test_data_service_call_continues_the_same_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
+    monkeypatch.setattr(telemetry, "OTLPMetricExporter", lambda **_kwargs: _MetricExporter())
+    monkeypatch.setattr(telemetry, "OTLPLogExporter", lambda **_kwargs: _LogExporter())
+    monkeypatch.setattr(telemetry, "_setup_process_metrics", lambda: None)
+    previous_configured = telemetry._configured
+    telemetry._configured = False
+    memory = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_kwargs: memory)
+    monkeypatch.setattr(telemetry, "BatchSpanProcessor", lambda exporter: SimpleSpanProcessor(exporter))
+    previous_provider = trace._TRACER_PROVIDER
+    previous_once = trace._TRACER_PROVIDER_SET_ONCE
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
+    captured: list[dict[str, str | None]] = []
+    application = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(
+            {
+                "path": request.url.path,
+                "traceparent": request.headers.get("traceparent"),
+                "baggage": request.headers.get("baggage"),
+                "request_id": request.headers.get("X-Request-ID"),
+            }
+        )
+        if request.url.path.endswith("/replicate"):
+            return httpx.Response(201, json={"status": "replicated"})
+        return httpx.Response(
+            201,
+            content=b'{"id":"22222222-2222-2222-2222-222222222222","status":"PROCESSED"}',
+            headers={"content-type": "application/json"},
+        )
+
+    settings = Settings(
+        service_name="service-a",
+        service_b_url="http://service-b:8080",
+        service_b_timeout_seconds=5,
+        data_service_url="http://data-service:8080",
+        log_level="INFO",
+    )
+    try:
+        application = create_app(settings=settings, transport=httpx.MockTransport(handler))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/orders",
+                json=ORDER,
+                headers={
+                    "X-Request-ID": REQUEST_ID,
+                    "traceparent": INCOMING_TRACEPARENT,
+                    "baggage": "lab=demo",
+                },
+            )
+    finally:
+        if application is not None:
+            await application.state.http_client.aclose()
+        telemetry.shutdown_telemetry()
+        telemetry._configured = previous_configured
+        trace._TRACER_PROVIDER = previous_provider
+        trace._TRACER_PROVIDER_SET_ONCE = previous_once
+
+    assert response.status_code == 201
+    assert [item["path"] for item in captured] == ["/api/v1/orders/process", "/api/v1/data/replicate"]
+    trace_ids = []
+    for item in captured:
+        assert item["request_id"] == REQUEST_ID
+        assert item["traceparent"] is not None
+        assert _TRACEPARENT.fullmatch(item["traceparent"])
+        assert item["baggage"] is not None
+        assert "lab=demo" in item["baggage"]
+        trace_ids.append(item["traceparent"].split("-")[1])
+    assert trace_ids == [INCOMING_TRACE_ID, INCOMING_TRACE_ID]
+    client_spans = [span for span in memory.get_finished_spans() if span.kind == SpanKind.CLIENT]
+    assert len(client_spans) == 2
+    assert all(format(span.context.trace_id, "032x") == INCOMING_TRACE_ID for span in client_spans)
+    assert all(span.resource.attributes["service.name"] == "service-a" for span in client_spans)

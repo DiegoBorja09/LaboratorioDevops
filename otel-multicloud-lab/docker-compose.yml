@@ -137,6 +137,48 @@ services:
     networks:
       - lab
 
+  data-service:
+    build:
+      context: ./services/data-service
+    environment:
+      SERVICE_NAME: data-service
+      GCP_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orders_db
+      AWS_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orders_db
+      LOG_LEVEL: INFO
+      OTEL_SERVICE_NAME: data-service
+      OTEL_DEPLOYMENT_ENVIRONMENT: local
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+      CHAOS_ENABLED: "false"
+      CHAOS_ERROR_RATE: "0"
+      CHAOS_DELAY_MS: "0"
+      CHAOS_TOKEN: ""
+    ports:
+      - "8083:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - lab
+
   service-a:
     build:
       context: ./services/service-a
@@ -151,10 +193,16 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: service.version=1.0.0,deployment.environment=local,service.namespace=otel-multicloud-lab
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+      DATA_SERVICE_URL: http://data-service:8080
+      DATA_SERVICE_AUDIENCE: ""
+      DATA_SERVICE_AUTH_ENABLED: "false"
+      DATA_SERVICE_TIMEOUT_SECONDS: "5"
     ports:
       - "8081:8080"
     depends_on:
       service-b:
+        condition: service_healthy
+      data-service:
         condition: service_healthy
       otel-collector:
         condition: service_started

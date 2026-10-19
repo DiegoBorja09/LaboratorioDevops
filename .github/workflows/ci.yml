@@ -45,10 +45,22 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/otel-multicloud-lab/services/service-b
         run: python -m pytest
 
+      - name: Instalar dependencias de data-service
+        working-directory: otel-multicloud-lab/services/data-service
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas de data-service
+        working-directory: otel-multicloud-lab/services/data-service
+        env:
+          OTEL_SDK_DISABLED: "true"
+          PYTHONPATH: ${{ github.workspace }}/otel-multicloud-lab/services/data-service
+        run: python -m pytest
+
       - name: Construir las imágenes Docker
         run: |
           docker build --tag otel-multicloud-lab-service-a:ci services/service-a
           docker build --tag otel-multicloud-lab-service-b:ci services/service-b
+          docker build --tag otel-multicloud-lab-data-service:ci services/data-service
 
       - name: Instalar Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
